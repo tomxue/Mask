@@ -1,0 +1,122 @@
+{
+  "name": "mask",
+  "displayName": "Mask",
+  "description": "Prevents copying of sensitive code by allowing developers to mark specific lines or segments as masked. When copying marked sections, the extension replaces sensitive content with configurable placeholder text. Ideal for protecting API keys, credentials, and confidential information while maintaining code shareability.",
+  "version": "0.0.4",
+  "publisher": "rbnnghs",
+  "icon": "images/icon-dots.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rbnnghs/mask"
+  },
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Formatters",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "security",
+    "privacy",
+    "sensitive",
+    "api-keys",
+    "credentials"
+  ],
+  "galleryBanner": {
+    "color": "#000000",
+    "theme": "dark"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mask.markMasked",
+        "title": "Mark as Masked"
+      },
+      {
+        "command": "mask.unmarkMasked",
+        "title": "Remove Mask"
+      },
+      {
+        "command": "mask.changeReplacementText",
+        "title": "Change Mask Replacement Text"
+      }
+    ],
+    "configuration": {
+      "title": "Mask",
+      "properties": {
+        "mask.replacementText": {
+          "type": "string",
+          "default": "[***]",
+          "description": "Text to show when copying masked code"
+        },
+        "mask.decorationColor": {
+          "type": "string",
+          "default": "#ff000033",
+          "description": "Background color for masked code regions"
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "mask.markMasked",
+          "when": "editorHasSelection",
+          "group": "1_modification"
+        },
+        {
+          "command": "mask.unmarkMasked",
+          "when": "editorHasSelection",
+          "group": "1_modification"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "mask.markMasked",
+        "key": "cmd+k cmd+m",
+        "mac": "cmd+k cmd+m",
+        "win": "ctrl+k ctrl+m",
+        "linux": "ctrl+k ctrl+m",
+        "when": "editorHasSelection"
+      },
+      {
+        "command": "mask.unmarkMasked",
+        "key": "cmd+k cmd+u",
+        "mac": "cmd+k cmd+u",
+        "win": "ctrl+k ctrl+u",
+        "linux": "ctrl+k ctrl+u",
+        "when": "editorHasSelection"
+      },
+      {
+        "key": "cmd+c",
+        "command": "editor.action.clipboardCopyAction",
+        "when": "editorTextFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "20.x",
+    "@types/vscode": "^1.96.0",
+    "@typescript-eslint/eslint-plugin": "^8.17.0",
+    "@typescript-eslint/parser": "^8.17.0",
+    "@vscode/test-cli": "^0.0.10",
+    "@vscode/test-electron": "^2.4.1",
+    "eslint": "^9.16.0",
+    "typescript": "^5.7.2"
+  }
+}
