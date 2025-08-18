@@ -233,13 +233,39 @@ export function activate(context: vscode.ExtensionContext) {
 		const fileUri = editor.document.uri.toString();
 		const ranges = maskedRanges.get(fileUri) || [];
 		
-		const removedRanges = ranges.filter(range => range.intersection(selection));
-		const newRanges = ranges.filter(range => !range.intersection(selection));
+		const newRanges: vscode.Range[] = [];
+		
+		for (const range of ranges) {
+			const intersection = range.intersection(selection);
+			if (!intersection) {
+				// No intersection, keep the original range
+				newRanges.push(range);
+			} else {
+				// There is intersection, need to split the range
+				const originalReplacementText = customReplacements.get(range.toString() + fileUri) || '[***]';
+				
+				// Remove the original range's replacement text
+				customReplacements.delete(range.toString() + fileUri);
+				
+				// Check if there's a part before the intersection
+				if (range.start.isBefore(selection.start)) {
+					const beforeRange = new vscode.Range(range.start, selection.start);
+					newRanges.push(beforeRange);
+					customReplacements.set(beforeRange.toString() + fileUri, originalReplacementText);
+				}
+				
+				// Check if there's a part after the intersection
+				if (selection.end.isBefore(range.end)) {
+					const afterRange = new vscode.Range(selection.end, range.end);
+					newRanges.push(afterRange);
+					customReplacements.set(afterRange.toString() + fileUri, originalReplacementText);
+				}
+				
+				// The intersection part is removed (not added to newRanges)
+			}
+		}
+		
 		maskedRanges.set(fileUri, newRanges);
-
-		removedRanges.forEach(range => {
-			customReplacements.delete(range.toString() + fileUri);
-		});
 
 		saveMasksToFile();
 		refreshDecorations();
