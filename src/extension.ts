@@ -108,18 +108,18 @@ export function activate(context: vscode.ExtensionContext) {
 		if (intersectingRanges.length > 0) {
 			let finalText = selectedText;
 			
-			for (const range of intersectingRanges) {
-				const intersection = range.intersection(selection);
-				if (intersection) {
-					const customText = customReplacements.get(range.toString() + fileUri);
-					const replacementText = customText || 
-						vscode.workspace.getConfiguration('mask').get<string>('replacementText') || 
-						'[***]';
+			// for (const range of intersectingRanges) {
+			// 	const intersection = range.intersection(selection);
+			// 	if (intersection) {
+			// 		const customText = customReplacements.get(range.toString() + fileUri);
+			// 		const replacementText = customText || 
+			// 			vscode.workspace.getConfiguration('mask').get<string>('replacementText') || 
+			// 			'[***]';
 
-					const intersectionText = editor.document.getText(intersection);
-					finalText = finalText.replace(intersectionText, replacementText);
-				}
-			}
+			// 		const intersectionText = editor.document.getText(intersection);
+			// 		finalText = finalText.replace(intersectionText, replacementText);
+			// 	}
+			// }
 			
 			await vscode.env.clipboard.writeText(finalText);
 			return;
@@ -141,18 +141,18 @@ export function activate(context: vscode.ExtensionContext) {
 		if (intersectingRanges.length > 0) {
 			let finalText = selectedText;
 			
-			for (const range of intersectingRanges) {
-				const intersection = range.intersection(selection);
-				if (intersection) {
-					const customText = customReplacements.get(range.toString() + fileUri);
-					const replacementText = customText || 
-						vscode.workspace.getConfiguration('mask').get<string>('replacementText') || 
-						'[***]';
+			// for (const range of intersectingRanges) {
+			// 	const intersection = range.intersection(selection);
+			// 	if (intersection) {
+			// 		const customText = customReplacements.get(range.toString() + fileUri);
+			// 		const replacementText = customText || 
+			// 			vscode.workspace.getConfiguration('mask').get<string>('replacementText') || 
+			// 			'[***]';
 
-					const intersectionText = editor.document.getText(intersection);
-					finalText = finalText.replace(intersectionText, replacementText);
-				}
-			}
+			// 		const intersectionText = editor.document.getText(intersection);
+			// 		finalText = finalText.replace(intersectionText, replacementText);
+			// 	}
+			// }
 			
 			await vscode.env.clipboard.writeText(finalText);
 			return;
@@ -182,9 +182,9 @@ function updateDecorationStyle() {
 	const decorationColor = config.get<string>('decorationColor') || '#ff000033';
 
 	maskDecoration = vscode.window.createTextEditorDecorationType({
-		backgroundColor: decorationColor,
-		border: '1px dashed red',
-		overviewRulerColor: 'red',
+		backgroundColor: '#4D4D4D',
+		// border: '1px dashed gray',
+		overviewRulerColor: 'green',
 		overviewRulerLane: vscode.OverviewRulerLane.Right,
 	});
 }
