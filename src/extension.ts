@@ -32,19 +32,96 @@ function getStorageFilePath(): string {
 	return path.join(vscodeDir, 'mask-storage.json');
 }
 
+function mergeOverlappingRanges(ranges: vscode.Range[], fileUri: string): vscode.Range[] {
+	if (ranges.length <= 1) return ranges;
+	
+	// Sort ranges by start position
+	const sortedRanges = ranges.sort((a, b) => {
+		if (a.start.line !== b.start.line) {
+			return a.start.line - b.start.line;
+		}
+		return a.start.character - b.start.character;
+	});
+	
+	const mergedRanges: vscode.Range[] = [];
+	let currentRange = sortedRanges[0];
+	let currentReplacementText = customReplacements.get(currentRange.toString() + fileUri) || '[***]';
+	
+	for (let i = 1; i < sortedRanges.length; i++) {
+		const nextRange = sortedRanges[i];
+		const nextReplacementText = customReplacements.get(nextRange.toString() + fileUri) || '[***]';
+		
+		// Check if ranges overlap or are adjacent
+		const currentEnd = currentRange.end;
+		const nextStart = nextRange.start;
+		
+		const overlapsOrAdjacent = 
+			// Same line: check character positions
+			(currentEnd.line === nextStart.line && currentEnd.character >= nextStart.character) ||
+			// Adjacent lines: current ends at end of line, next starts at beginning of next line
+			(currentEnd.line + 1 === nextStart.line && nextStart.character === 0) ||
+			// Overlapping lines
+			currentEnd.line > nextStart.line;
+		
+		if (overlapsOrAdjacent) {
+			// Merge ranges - extend current range to cover both
+			const newEnd = currentRange.end.isAfter(nextRange.end) ? currentRange.end : nextRange.end;
+			const mergedRange = new vscode.Range(currentRange.start, newEnd);
+			
+			// Remove old replacement texts
+			customReplacements.delete(currentRange.toString() + fileUri);
+			customReplacements.delete(nextRange.toString() + fileUri);
+			
+			// Use the replacement text from the first range, or combine if different
+			let mergedReplacementText = currentReplacementText;
+			if (currentReplacementText !== nextReplacementText) {
+				mergedReplacementText = `${currentReplacementText}`;
+			}
+			
+			currentRange = mergedRange;
+			customReplacements.set(currentRange.toString() + fileUri, mergedReplacementText);
+		} else {
+			// No overlap, add current range to result and move to next
+			mergedRanges.push(currentRange);
+			currentRange = nextRange;
+			currentReplacementText = nextReplacementText;
+		}
+	}
+	
+	// Add the last range
+	mergedRanges.push(currentRange);
+	
+	return mergedRanges;
+}
+
 function saveMasksToFile() {
 	try {
 		const storage: MaskStorage = {};
 		
 		for (const [fileUri, ranges] of maskedRanges.entries()) {
+			// First remove exact duplicates, then merge overlapping ranges
+			const uniqueRanges = ranges.filter((range, index, array) => {
+				return array.findIndex(r => 
+					r.start.line === range.start.line &&
+					r.start.character === range.start.character &&
+					r.end.line === range.end.line &&
+					r.end.character === range.end.character
+				) === index;
+			});
+			
+			const mergedRanges = mergeOverlappingRanges(uniqueRanges, fileUri);
+			
 			const maskData: MaskData = {
-				ranges: ranges.map(range => ({
+				ranges: mergedRanges.map(range => ({
 					start: { line: range.start.line, character: range.start.character },
 					end: { line: range.end.line, character: range.end.character },
 					replacementText: customReplacements.get(range.toString() + fileUri) || '[***]'
 				}))
 			};
 			storage[fileUri] = maskData;
+			
+			// Update the in-memory ranges with the merged version
+			maskedRanges.set(fileUri, mergedRanges);
 		}
 		
 		const storageFilePath = getStorageFilePath();
@@ -125,9 +202,14 @@ export function activate(context: vscode.ExtensionContext) {
 		const fileUri = editor.document.uri.toString();
 		const ranges = maskedRanges.get(fileUri) || [];
 		const range = new vscode.Range(selection.start, selection.end);
+		
+		// Add the new range
 		ranges.push(range);
-		maskedRanges.set(fileUri, ranges);
 		customReplacements.set(range.toString() + fileUri, replacementText);
+		
+		// Merge overlapping ranges immediately
+		const mergedRanges = mergeOverlappingRanges(ranges, fileUri);
+		maskedRanges.set(fileUri, mergedRanges);
 
 		saveMasksToFile();
 		refreshDecorations();
