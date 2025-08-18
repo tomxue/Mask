@@ -1,12 +1,94 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 
 const maskedRanges = new Map<string, vscode.Range[]>();
 const customReplacements = new Map<string, string>();
 let maskDecoration: vscode.TextEditorDecorationType;
 
+interface MaskData {
+	ranges: Array<{
+		start: { line: number; character: number };
+		end: { line: number; character: number };
+		replacementText: string;
+	}>;
+}
+
+interface MaskStorage {
+	[filePath: string]: MaskData;
+}
+
+function getStorageFilePath(): string {
+	const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+	if (!workspaceFolder) {
+		return path.join(require('os').homedir(), '.vscode-mask-storage.json');
+	}
+	
+	const vscodeDir = path.join(workspaceFolder.uri.fsPath, '.vscode');
+	if (!fs.existsSync(vscodeDir)) {
+		fs.mkdirSync(vscodeDir, { recursive: true });
+	}
+	
+	return path.join(vscodeDir, 'mask-storage.json');
+}
+
+function saveMasksToFile() {
+	try {
+		const storage: MaskStorage = {};
+		
+		for (const [fileUri, ranges] of maskedRanges.entries()) {
+			const maskData: MaskData = {
+				ranges: ranges.map(range => ({
+					start: { line: range.start.line, character: range.start.character },
+					end: { line: range.end.line, character: range.end.character },
+					replacementText: customReplacements.get(range.toString() + fileUri) || '[***]'
+				}))
+			};
+			storage[fileUri] = maskData;
+		}
+		
+		const storageFilePath = getStorageFilePath();
+		fs.writeFileSync(storageFilePath, JSON.stringify(storage, null, 2));
+	} catch (error) {
+		console.error('Failed to save masks:', error);
+	}
+}
+
+function loadMasksFromFile() {
+	try {
+		const storageFilePath = getStorageFilePath();
+		if (!fs.existsSync(storageFilePath)) {
+			return;
+		}
+		
+		const data = fs.readFileSync(storageFilePath, 'utf8');
+		const storage: MaskStorage = JSON.parse(data);
+		
+		maskedRanges.clear();
+		customReplacements.clear();
+		
+		for (const [fileUri, maskData] of Object.entries(storage)) {
+			const ranges = maskData.ranges.map(rangeData => {
+				const range = new vscode.Range(
+					new vscode.Position(rangeData.start.line, rangeData.start.character),
+					new vscode.Position(rangeData.end.line, rangeData.end.character)
+				);
+				customReplacements.set(range.toString() + fileUri, rangeData.replacementText);
+				return range;
+			});
+			maskedRanges.set(fileUri, ranges);
+		}
+		
+		refreshDecorations();
+	} catch (error) {
+		console.error('Failed to load masks:', error);
+	}
+}
+
 export function activate(context: vscode.ExtensionContext) {
 	console.log('Mask extension is now active');
 	updateDecorationStyle();
+	loadMasksFromFile();
 
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration(e => {
@@ -47,6 +129,7 @@ export function activate(context: vscode.ExtensionContext) {
 		maskedRanges.set(fileUri, ranges);
 		customReplacements.set(range.toString() + fileUri, replacementText);
 
+		saveMasksToFile();
 		refreshDecorations();
 
 		const changeAction = 'Change Replacement Text';
@@ -76,6 +159,7 @@ export function activate(context: vscode.ExtensionContext) {
 			customReplacements.delete(range.toString() + fileUri);
 		});
 
+		saveMasksToFile();
 		refreshDecorations();
 	});
 
@@ -168,6 +252,7 @@ export function activate(context: vscode.ExtensionContext) {
 		copyHandler,
 		copyWithSyntaxHandler,
 		vscode.window.onDidChangeActiveTextEditor(() => {
+			loadMasksFromFile();
 			refreshDecorations();
 		})
 	);
