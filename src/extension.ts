@@ -429,7 +429,7 @@ function updateDecorationStyle() {
 	const decorationColor = config.get<string>('decorationColor') || '#ff000033';
 
 	maskDecoration = vscode.window.createTextEditorDecorationType({
-		backgroundColor: '#4D4D4D',
+		backgroundColor: '#2D2D2D',
 		// border: '1px dashed gray',
 		overviewRulerColor: 'green',
 		overviewRulerLane: vscode.OverviewRulerLane.Right,
