@@ -10,7 +10,6 @@ interface MaskData {
 	ranges: Array<{
 		start: { line: number; character: number };
 		end: { line: number; character: number };
-		replacementText: string;
 	}>;
 }
 
@@ -114,8 +113,7 @@ function saveMasksToFile() {
 			const maskData: MaskData = {
 				ranges: mergedRanges.map(range => ({
 					start: { line: range.start.line, character: range.start.character },
-					end: { line: range.end.line, character: range.end.character },
-					replacementText: customReplacements.get(range.toString() + fileUri) || '[***]'
+					end: { line: range.end.line, character: range.end.character }
 				}))
 			};
 			storage[fileUri] = maskData;
@@ -142,7 +140,6 @@ function loadMasksFromFile() {
 		const storage: MaskStorage = JSON.parse(data);
 		
 		maskedRanges.clear();
-		customReplacements.clear();
 		
 		for (const [fileUri, maskData] of Object.entries(storage)) {
 			const ranges = maskData.ranges.map(rangeData => {
@@ -150,7 +147,6 @@ function loadMasksFromFile() {
 					new vscode.Position(rangeData.start.line, rangeData.start.character),
 					new vscode.Position(rangeData.end.line, rangeData.end.character)
 				);
-				customReplacements.set(range.toString() + fileUri, rangeData.replacementText);
 				return range;
 			});
 			maskedRanges.set(fileUri, ranges);
