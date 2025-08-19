@@ -17,17 +17,75 @@ interface MaskStorage {
 	[filePath: string]: MaskData;
 }
 
+function findOneDriveDirectory(): string | null {
+	// First, try environment variables (most reliable)
+	const oneDriveFromEnv = process.env['OneDrive'] || process.env['ONEDRIVE'];
+	if (oneDriveFromEnv && fs.existsSync(oneDriveFromEnv)) {
+		return oneDriveFromEnv;
+	}
+	
+	// Check Windows-specific locations
+	if (process.platform === 'win32') {
+		const os = require('os');
+		const homedir = os.homedir();
+		
+		// Check user home directory for OneDrive
+		const homeOneDrivePath = path.join(homedir, 'OneDrive');
+		if (fs.existsSync(homeOneDrivePath)) {
+			return homeOneDrivePath;
+		}
+		
+		// Check for enterprise OneDrive patterns
+		try {
+			// Check in user home directory for OneDrive - * pattern
+			const homeFiles = fs.readdirSync(homedir);
+			
+			for (const file of homeFiles) {
+				if (file.startsWith('OneDrive - ')) {
+					const fullPath = path.join(homedir, file);
+					if (fs.statSync(fullPath).isDirectory()) {
+						return fullPath;
+					}
+				}
+			}
+		} catch (err) {
+			// Error scanning for OneDrive patterns
+		}
+	}
+	
+	return null;
+}
+
 function getStorageFilePath(): string {
 	const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+	const oneDriveDir = findOneDriveDirectory();
+	
 	if (!workspaceFolder) {
+		// Use OneDrive if available, otherwise fall back to home directory
+		if (oneDriveDir) {
+			const storageDir = path.join(oneDriveDir, '.vscode-mask-storage');
+			if (!fs.existsSync(storageDir)) {
+				fs.mkdirSync(storageDir, { recursive: true });
+			}
+			return path.join(storageDir, 'mask-storage.json');
+		}
 		return path.join(require('os').homedir(), '.vscode-mask-storage.json');
 	}
 	
+	// Use OneDrive for storage if available
+	if (oneDriveDir) {
+		const storageDir = path.join(oneDriveDir, '.vscode-mask-storage');
+		if (!fs.existsSync(storageDir)) {
+			fs.mkdirSync(storageDir, { recursive: true });
+		}
+		return path.join(storageDir, 'mask-storage.json');
+	}
+	
+	// Use local workspace .vscode directory
 	const vscodeDir = path.join(workspaceFolder.uri.fsPath, '.vscode');
 	if (!fs.existsSync(vscodeDir)) {
 		fs.mkdirSync(vscodeDir, { recursive: true });
 	}
-	
 	return path.join(vscodeDir, 'mask-storage.json');
 }
 
