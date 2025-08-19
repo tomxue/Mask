@@ -65,23 +65,17 @@ function findMatchingFileInStorage(currentFileUri: string, storage: MaskStorage)
 	// Search through storage for matching metadata
 	for (const [storedFileUri, maskData] of Object.entries(storage)) {
 		// Skip if no metadata exists (old format)
-		if (!maskData.filename || maskData.fileSize === undefined || 
-			!maskData.lineCount || !maskData.md5Hash) {
+		if (maskData.fileSize === undefined || !maskData.lineCount || !maskData.md5Hash) {
 			continue;
 		}
 		
-		// Check filename match
-		if (maskData.filename !== currentMetadata.filename) {
-			continue;
-		}
-		
-		// Check file size and line count match
+		// Check file size and line count match first (fast comparison)
 		if (maskData.fileSize !== currentMetadata.fileSize || 
 			maskData.lineCount !== currentMetadata.lineCount) {
 			continue;
 		}
 		
-		// Check MD5 hash match
+		// Check MD5 hash match (more expensive comparison)
 		if (maskData.md5Hash !== currentMetadata.md5Hash) {
 			continue;
 		}
@@ -447,8 +441,7 @@ function loadMasksFromFile() {
 				}
 				
 				// Check if this entry is missing metadata (old format) and try to update it
-				if (!maskData.filename || maskData.fileSize === undefined || 
-					!maskData.lineCount || !maskData.md5Hash) {
+				if (maskData.fileSize === undefined || !maskData.lineCount || !maskData.md5Hash) {
 					
 					const uri = vscode.Uri.parse(openFileUri);
 					const filePath = uri.fsPath;
@@ -507,8 +500,7 @@ function loadMasksFromFile() {
 			}
 			
 			// Check if this entry is missing metadata (old format) and try to update it
-			if (!maskData.filename || maskData.fileSize === undefined || 
-				!maskData.lineCount || !maskData.md5Hash) {
+			if (maskData.fileSize === undefined || !maskData.lineCount || !maskData.md5Hash) {
 				
 				const uri = vscode.Uri.parse(fileUri);
 				const filePath = uri.fsPath;
