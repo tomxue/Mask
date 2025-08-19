@@ -156,6 +156,11 @@ function saveMasksToFile() {
 		const storage: MaskStorage = {};
 		
 		for (const [fileUri, ranges] of maskedRanges.entries()) {
+			// Skip entries with empty ranges
+			if (!ranges || ranges.length === 0) {
+				continue;
+			}
+			
 			// First remove exact duplicates, then merge overlapping ranges
 			const uniqueRanges = ranges.filter((range, index, array) => {
 				return array.findIndex(r => 
@@ -168,16 +173,19 @@ function saveMasksToFile() {
 			
 			const mergedRanges = mergeOverlappingRanges(uniqueRanges, fileUri);
 			
-			const maskData: MaskData = {
-				ranges: mergedRanges.map(range => ({
-					start: { line: range.start.line, character: range.start.character },
-					end: { line: range.end.line, character: range.end.character }
-				}))
-			};
-			storage[fileUri] = maskData;
-			
-			// Update the in-memory ranges with the merged version
-			maskedRanges.set(fileUri, mergedRanges);
+			// Only save if there are still ranges after merging
+			if (mergedRanges.length > 0) {
+				const maskData: MaskData = {
+					ranges: mergedRanges.map(range => ({
+						start: { line: range.start.line, character: range.start.character },
+						end: { line: range.end.line, character: range.end.character }
+					}))
+				};
+				storage[fileUri] = maskData;
+				
+				// Update the in-memory ranges with the merged version
+				maskedRanges.set(fileUri, mergedRanges);
+			}
 		}
 		
 		const storageFilePath = getStorageFilePath();
@@ -247,6 +255,12 @@ function loadMasksFromFile() {
 		let hasChanges = false;
 		
 		for (const [fileUri, maskData] of Object.entries(storage)) {
+			// Skip entries with empty ranges
+			if (!maskData.ranges || maskData.ranges.length === 0) {
+				hasChanges = true;
+				continue;
+			}
+			
 			const ranges = maskData.ranges.map(rangeData => {
 				const range = new vscode.Range(
 					new vscode.Position(rangeData.start.line, rangeData.start.character),
