@@ -187,6 +187,52 @@ function saveMasksToFile() {
 	}
 }
 
+function validateAndCleanMaskRanges(fileUri: string, ranges: vscode.Range[]): vscode.Range[] {
+	try {
+		// Convert URI to file path
+		const uri = vscode.Uri.parse(fileUri);
+		if (uri.scheme !== 'file') {
+			return ranges; // Only validate local files
+		}
+		
+		const filePath = uri.fsPath;
+		if (!fs.existsSync(filePath)) {
+			console.log(`File no longer exists, removing all mask ranges: ${filePath}`);
+			return [];
+		}
+		
+		// Get actual file line count
+		const fileContent = fs.readFileSync(filePath, 'utf8');
+		const fileLines = fileContent.split('\n');
+		const maxLine = fileLines.length - 1; // 0-based indexing
+		
+		// Filter out ranges that exceed file bounds
+		const validRanges = ranges.filter(range => {
+			const startValid = range.start.line <= maxLine;
+			const endValid = range.end.line <= maxLine;
+			
+			if (!startValid || !endValid) {
+				console.log(`Removing invalid mask range: lines ${range.start.line}-${range.end.line} (file has ${fileLines.length} lines)`);
+				// Also remove any custom replacement text for this range
+				customReplacements.delete(range.toString() + fileUri);
+				return false;
+			}
+			
+			return true;
+		});
+		
+		// If ranges were removed, update the storage file
+		if (validRanges.length !== ranges.length) {
+			console.log(`Cleaned ${ranges.length - validRanges.length} invalid ranges from ${filePath}`);
+		}
+		
+		return validRanges;
+	} catch (error) {
+		console.error(`Error validating ranges for ${fileUri}:`, error);
+		return ranges; // Return original ranges if validation fails
+	}
+}
+
 function loadMasksFromFile() {
 	try {
 		const storageFilePath = getStorageFilePath();
@@ -198,6 +244,7 @@ function loadMasksFromFile() {
 		const storage: MaskStorage = JSON.parse(data);
 		
 		maskedRanges.clear();
+		let hasChanges = false;
 		
 		for (const [fileUri, maskData] of Object.entries(storage)) {
 			const ranges = maskData.ranges.map(rangeData => {
@@ -207,7 +254,22 @@ function loadMasksFromFile() {
 				);
 				return range;
 			});
-			maskedRanges.set(fileUri, ranges);
+			
+			// Validate and clean ranges against actual file content
+			const validRanges = validateAndCleanMaskRanges(fileUri, ranges);
+			
+			if (validRanges.length !== ranges.length) {
+				hasChanges = true;
+			}
+			
+			if (validRanges.length > 0) {
+				maskedRanges.set(fileUri, validRanges);
+			}
+		}
+		
+		// Save cleaned storage if there were changes
+		if (hasChanges) {
+			saveMasksToFile();
 		}
 		
 		refreshDecorations();
