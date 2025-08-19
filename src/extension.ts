@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 const maskedRanges = new Map<string, vscode.Range[]>();
 const customReplacements = new Map<string, string>();
@@ -11,10 +12,85 @@ interface MaskData {
 		start: { line: number; character: number };
 		end: { line: number; character: number };
 	}>;
+	filename?: string;
+	fileSize?: number;
+	lineCount?: number;
+	md5Hash?: string;
 }
 
 interface MaskStorage {
 	[filePath: string]: MaskData;
+}
+
+function calculateFileMetadata(filePath: string): { filename: string; fileSize: number; lineCount: number; md5Hash: string } | null {
+	try {
+		if (!fs.existsSync(filePath)) {
+			return null;
+		}
+		
+		const stats = fs.statSync(filePath);
+		const fileContent = fs.readFileSync(filePath, 'utf8');
+		const lines = fileContent.split('\n');
+		
+		const hash = crypto.createHash('md5');
+		hash.update(fileContent);
+		
+		return {
+			filename: path.basename(filePath),
+			fileSize: stats.size,
+			lineCount: lines.length,
+			md5Hash: hash.digest('hex')
+		};
+	} catch (error) {
+		console.error(`Error calculating file metadata for ${filePath}:`, error);
+		return null;
+	}
+}
+
+function findMatchingFileInStorage(currentFileUri: string, storage: MaskStorage): string | null {
+	// First check if the exact path exists in storage
+	if (storage[currentFileUri]) {
+		return currentFileUri;
+	}
+	
+	// Get current file metadata
+	const uri = vscode.Uri.parse(currentFileUri);
+	const currentFilePath = uri.fsPath;
+	const currentMetadata = calculateFileMetadata(currentFilePath);
+	
+	if (!currentMetadata) {
+		return null;
+	}
+	
+	// Search through storage for matching metadata
+	for (const [storedFileUri, maskData] of Object.entries(storage)) {
+		// Skip if no metadata exists (old format)
+		if (!maskData.filename || maskData.fileSize === undefined || 
+			!maskData.lineCount || !maskData.md5Hash) {
+			continue;
+		}
+		
+		// Check filename match
+		if (maskData.filename !== currentMetadata.filename) {
+			continue;
+		}
+		
+		// Check file size and line count match
+		if (maskData.fileSize !== currentMetadata.fileSize || 
+			maskData.lineCount !== currentMetadata.lineCount) {
+			continue;
+		}
+		
+		// Check MD5 hash match
+		if (maskData.md5Hash !== currentMetadata.md5Hash) {
+			continue;
+		}
+		
+		// All metadata matches - this is the same file
+		return storedFileUri;
+	}
+	
+	return null;
 }
 
 function findOneDriveDirectory(): string | null {
@@ -175,16 +251,27 @@ function saveMasksToFile() {
 			
 			// Only save if there are still ranges after merging
 			if (mergedRanges.length > 0) {
-				const maskData: MaskData = {
-					ranges: mergedRanges.map(range => ({
-						start: { line: range.start.line, character: range.start.character },
-						end: { line: range.end.line, character: range.end.character }
-					}))
-				};
-				storage[fileUri] = maskData;
+				// Get file metadata
+				const uri = vscode.Uri.parse(fileUri);
+				const filePath = uri.fsPath;
+				const metadata = calculateFileMetadata(filePath);
 				
-				// Update the in-memory ranges with the merged version
-				maskedRanges.set(fileUri, mergedRanges);
+				if (metadata) {
+					const maskData: MaskData = {
+						ranges: mergedRanges.map(range => ({
+							start: { line: range.start.line, character: range.start.character },
+							end: { line: range.end.line, character: range.end.character }
+						})),
+						filename: metadata.filename,
+						fileSize: metadata.fileSize,
+						lineCount: metadata.lineCount,
+						md5Hash: metadata.md5Hash
+					};
+					storage[fileUri] = maskData;
+					
+					// Update the in-memory ranges with the merged version
+					maskedRanges.set(fileUri, mergedRanges);
+				}
 			}
 		}
 		
@@ -241,9 +328,90 @@ function validateAndCleanMaskRanges(fileUri: string, ranges: vscode.Range[]): vs
 	}
 }
 
+function loadMasksForSingleFile(fileUri: string): boolean {
+	try {
+		const storageFilePath = getStorageFilePath();
+		if (!fs.existsSync(storageFilePath)) {
+			return false;
+		}
+		
+		const data = fs.readFileSync(storageFilePath, 'utf8');
+		const storage: MaskStorage = JSON.parse(data);
+		
+		let hasChanges = false;
+		const matchingStorageKey = findMatchingFileInStorage(fileUri, storage);
+		
+		if (matchingStorageKey) {
+			const maskData = storage[matchingStorageKey];
+			
+			// Skip entries with empty ranges
+			if (!maskData.ranges || maskData.ranges.length === 0) {
+				return false;
+			}
+			
+			// Check if this entry is missing metadata (old format) and try to update it
+			if (!maskData.filename || maskData.fileSize === undefined || 
+				!maskData.lineCount || !maskData.md5Hash) {
+				
+				const uri = vscode.Uri.parse(fileUri);
+				const filePath = uri.fsPath;
+				const metadata = calculateFileMetadata(filePath);
+				
+				if (metadata) {
+					// Update the storage entry with metadata
+					maskData.filename = metadata.filename;
+					maskData.fileSize = metadata.fileSize;
+					maskData.lineCount = metadata.lineCount;
+					maskData.md5Hash = metadata.md5Hash;
+					hasChanges = true;
+					console.log(`Updated old format entry with metadata: ${matchingStorageKey}`);
+				}
+			}
+			
+			const ranges = maskData.ranges.map(rangeData => {
+				const range = new vscode.Range(
+					new vscode.Position(rangeData.start.line, rangeData.start.character),
+					new vscode.Position(rangeData.end.line, rangeData.end.character)
+				);
+				return range;
+			});
+			
+			// Validate and clean ranges against actual file content
+			const validRanges = validateAndCleanMaskRanges(fileUri, ranges);
+			
+			if (validRanges.length !== ranges.length) {
+				hasChanges = true;
+			}
+			
+			if (validRanges.length > 0) {
+				maskedRanges.set(fileUri, validRanges);
+				
+				// If the storage key is different from current file URI, update storage
+				if (matchingStorageKey !== fileUri) {
+					hasChanges = true;
+					console.log(`Found matching file by metadata: ${matchingStorageKey} -> ${fileUri}`);
+				}
+				
+				// Save changes if any
+				if (hasChanges) {
+					saveMasksToFile();
+				}
+				
+				return true;
+			}
+		}
+		
+		return false;
+	} catch (error) {
+		console.error(`Failed to load masks for file ${fileUri}:`, error);
+		return false;
+	}
+}
+
 function loadMasksFromFile() {
 	try {
 		const storageFilePath = getStorageFilePath();
+		
 		if (!fs.existsSync(storageFilePath)) {
 			return;
 		}
@@ -254,11 +422,106 @@ function loadMasksFromFile() {
 		maskedRanges.clear();
 		let hasChanges = false;
 		
+		// Get all currently open files and the active editor
+		const openFiles = vscode.workspace.textDocuments.map(doc => doc.uri.toString());
+		const activeEditor = vscode.window.activeTextEditor;
+		
+		// Add active editor file if not already in the list
+		if (activeEditor && !openFiles.includes(activeEditor.document.uri.toString())) {
+			openFiles.push(activeEditor.document.uri.toString());
+		}
+		
+		// Process storage entries and try to match with open files
+		const processedStorageKeys = new Set<string>();
+		
+		for (const openFileUri of openFiles) {
+			const matchingStorageKey = findMatchingFileInStorage(openFileUri, storage);
+			
+			if (matchingStorageKey) {
+				const maskData = storage[matchingStorageKey];
+				
+				// Skip entries with empty ranges
+				if (!maskData.ranges || maskData.ranges.length === 0) {
+					hasChanges = true;
+					continue;
+				}
+				
+				// Check if this entry is missing metadata (old format) and try to update it
+				if (!maskData.filename || maskData.fileSize === undefined || 
+					!maskData.lineCount || !maskData.md5Hash) {
+					
+					const uri = vscode.Uri.parse(openFileUri);
+					const filePath = uri.fsPath;
+					const metadata = calculateFileMetadata(filePath);
+					
+					if (metadata) {
+						// Update the storage entry with metadata
+						maskData.filename = metadata.filename;
+						maskData.fileSize = metadata.fileSize;
+						maskData.lineCount = metadata.lineCount;
+						maskData.md5Hash = metadata.md5Hash;
+						hasChanges = true;
+					}
+				}
+				
+				const ranges = maskData.ranges.map(rangeData => {
+					const range = new vscode.Range(
+						new vscode.Position(rangeData.start.line, rangeData.start.character),
+						new vscode.Position(rangeData.end.line, rangeData.end.character)
+					);
+					return range;
+				});
+				
+				// Validate and clean ranges against actual file content
+				const validRanges = validateAndCleanMaskRanges(openFileUri, ranges);
+				
+				if (validRanges.length !== ranges.length) {
+					hasChanges = true;
+				}
+				
+				if (validRanges.length > 0) {
+					maskedRanges.set(openFileUri, validRanges);
+					
+					// If the storage key is different from current file URI, update storage
+					if (matchingStorageKey !== openFileUri) {
+						hasChanges = true;
+					}
+				}
+				
+				// Mark this storage key as processed
+				processedStorageKeys.add(matchingStorageKey);
+			}
+		}
+		
+		// Also process any remaining storage entries that weren't matched by open files
+		// (for backward compatibility and files that might be opened later)
 		for (const [fileUri, maskData] of Object.entries(storage)) {
+			if (processedStorageKeys.has(fileUri)) {
+				continue;
+			}
+			
 			// Skip entries with empty ranges
 			if (!maskData.ranges || maskData.ranges.length === 0) {
 				hasChanges = true;
 				continue;
+			}
+			
+			// Check if this entry is missing metadata (old format) and try to update it
+			if (!maskData.filename || maskData.fileSize === undefined || 
+				!maskData.lineCount || !maskData.md5Hash) {
+				
+				const uri = vscode.Uri.parse(fileUri);
+				const filePath = uri.fsPath;
+				const metadata = calculateFileMetadata(filePath);
+				
+				if (metadata) {
+					// Update the storage entry with metadata
+					maskData.filename = metadata.filename;
+					maskData.fileSize = metadata.fileSize;
+					maskData.lineCount = metadata.lineCount;
+					maskData.md5Hash = metadata.md5Hash;
+					hasChanges = true;
+				}
 			}
 			
 			const ranges = maskData.ranges.map(rangeData => {
@@ -490,6 +753,10 @@ export function activate(context: vscode.ExtensionContext) {
 		copyHandler,
 		copyWithSyntaxHandler,
 		vscode.window.onDidChangeActiveTextEditor(() => {
+			loadMasksFromFile();
+			refreshDecorations();
+		}),
+		vscode.workspace.onDidOpenTextDocument(() => {
 			loadMasksFromFile();
 			refreshDecorations();
 		})
