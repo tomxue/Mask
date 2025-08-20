@@ -751,6 +751,22 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.workspace.onDidOpenTextDocument(() => {
 			loadMasksFromFile();
 			refreshDecorations();
+		}),
+		vscode.workspace.onDidSaveTextDocument((document) => {
+			const fileUri = document.uri.toString();
+			const ranges = maskedRanges.get(fileUri);
+			
+			// Only update metadata if this file has mask ranges
+			if (ranges && ranges.length > 0) {
+				// Update metadata for this specific file
+				const filePath = document.uri.fsPath;
+				const metadata = calculateFileMetadata(filePath);
+				
+				if (metadata) {
+					// Save the masks with updated metadata
+					saveMasksToFile();
+				}
+			}
 		})
 	);
 }
