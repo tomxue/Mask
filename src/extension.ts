@@ -36,11 +36,11 @@ class MaskFileDecorationProvider implements vscode.FileDecorationProvider {
 
 		// Use different square fill levels based on mask percentage
 		let badge: string;
-		if (percentage < 25) {
+		if (percentage < 33) {
 			badge = '▫'; // Empty square
-		} else if (percentage < 50) {
+		} else if (percentage <= 66) {
 			badge = '◪'; // Quarter filled (upper left empty)
-		} else if (percentage < 75) {
+		} else if (percentage < 100) {
 			badge = '▤'; // Half filled
 		} else {
 			badge = '■'; // Full square
