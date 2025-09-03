@@ -6,6 +6,57 @@ import * as crypto from 'crypto';
 const maskedRanges = new Map<string, vscode.Range[]>();
 const customReplacements = new Map<string, string>();
 let maskDecoration: vscode.TextEditorDecorationType;
+let fileDecorationProvider: MaskFileDecorationProvider;
+
+class MaskFileDecorationProvider implements vscode.FileDecorationProvider {
+	private _onDidChangeFileDecorations = new vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>();
+	readonly onDidChangeFileDecorations = this._onDidChangeFileDecorations.event;
+
+	provideFileDecoration(uri: vscode.Uri): vscode.FileDecoration | undefined {
+		// Only provide decorations for files (not folders)
+		if (uri.scheme !== 'file') {
+			return undefined;
+		}
+
+		const fileUri = uri.toString();
+		const ranges = maskedRanges.get(fileUri);
+		
+		console.log(`Checking decoration for ${fileUri}: ${ranges ? ranges.length : 0} ranges`);
+		
+		if (!ranges || ranges.length === 0) {
+			return undefined;
+		}
+
+		const percentage = calculateMaskPercentage(fileUri);
+		console.log(`Calculated percentage for ${path.basename(uri.fsPath)}: ${percentage}%`);
+		
+		if (percentage === 0) {
+			return undefined;
+		}
+
+		// Determine color based on mask percentage (4 levels)
+		let colorTheme: string;
+		if (percentage < 25) {
+			colorTheme = 'descriptionForeground'; // Gray
+		} else if (percentage < 50) {
+			colorTheme = 'charts.yellow'; // Yellow
+		} else if (percentage < 75) {
+			colorTheme = 'charts.blue'; // Blue
+		} else {
+			colorTheme = 'charts.green'; // Green
+		}
+
+		return {
+			badge: '■',
+			tooltip: `${percentage}% of lines are masked`,
+			color: new vscode.ThemeColor(colorTheme)
+		};
+	}
+
+	refresh(uri?: vscode.Uri): void {
+		this._onDidChangeFileDecorations.fire(uri);
+	}
+}
 
 interface MaskData {
 	ranges: Array<{
@@ -271,6 +322,9 @@ function saveMasksToFile() {
 		
 		const storageFilePath = getStorageFilePath();
 		fs.writeFileSync(storageFilePath, JSON.stringify(storage, null, 2));
+		
+		// Refresh file decorations after saving
+		refreshFileDecorations();
 	} catch (error) {
 		console.error('Failed to save masks:', error);
 	}
@@ -542,6 +596,7 @@ function loadMasksFromFile() {
 		}
 		
 		refreshDecorations();
+		refreshFileDecorations();
 	} catch (error) {
 		console.error('Failed to load masks:', error);
 	}
@@ -551,6 +606,12 @@ export function activate(context: vscode.ExtensionContext) {
 	console.log('Mask extension is now active');
 	updateDecorationStyle();
 	loadMasksFromFile();
+
+	// Register file decoration provider
+	fileDecorationProvider = new MaskFileDecorationProvider();
+	context.subscriptions.push(
+		vscode.window.registerFileDecorationProvider(fileDecorationProvider)
+	);
 
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration(e => {
@@ -836,6 +897,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 				// Refresh decorations for currently open editors
 				refreshDecorations();
+				refreshFileDecorations();
 
 				vscode.window.showInformationMessage(
 					`Successfully cleared masks from ${clearedCount} files in "${path.basename(targetPath)}"`
@@ -966,6 +1028,50 @@ function updateDecorationStyle() {
 	});
 }
 
+function calculateMaskPercentage(fileUri: string): number {
+	try {
+		const ranges = maskedRanges.get(fileUri) || [];
+		if (ranges.length === 0) {
+			return 0;
+		}
+
+		// Get unique line numbers that are masked
+		const maskedLines = new Set<number>();
+		for (const range of ranges) {
+			for (let line = range.start.line; line <= range.end.line; line++) {
+				maskedLines.add(line);
+			}
+		}
+
+		// Get total line count from file
+		const uri = vscode.Uri.parse(fileUri);
+		const filePath = uri.fsPath;
+		
+		if (!fs.existsSync(filePath)) {
+			return 0;
+		}
+
+		const fileContent = fs.readFileSync(filePath, 'utf8');
+		const totalLines = fileContent.split('\n').length;
+
+		if (totalLines === 0) {
+			return 0;
+		}
+
+		const percentage = (maskedLines.size / totalLines) * 100;
+		return Math.round(percentage);
+	} catch (error) {
+		console.error('Error calculating mask percentage:', error);
+		return 0;
+	}
+}
+
+function refreshFileDecorations() {
+	if (fileDecorationProvider) {
+		fileDecorationProvider.refresh();
+	}
+}
+
 function refreshDecorations() {
 	const editor = vscode.window.activeTextEditor;
 	if (!editor) return;
@@ -973,6 +1079,9 @@ function refreshDecorations() {
 	const fileUri = editor.document.uri.toString();
 	const ranges = maskedRanges.get(fileUri) || [];
 	editor.setDecorations(maskDecoration, ranges);
+	
+	// Also refresh file decorations
+	refreshFileDecorations();
 }
 
 export function deactivate() {
