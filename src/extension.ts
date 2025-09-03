@@ -34,22 +34,22 @@ class MaskFileDecorationProvider implements vscode.FileDecorationProvider {
 			return undefined;
 		}
 
-		// Determine color based on mask percentage (4 levels)
-		let colorTheme: string;
+		// Use different square fill levels based on mask percentage
+		let badge: string;
 		if (percentage < 25) {
-			colorTheme = 'descriptionForeground'; // Gray
+			badge = '▫'; // Empty square
 		} else if (percentage < 50) {
-			colorTheme = 'charts.yellow'; // Yellow
+			badge = '◪'; // Quarter filled (upper left empty)
 		} else if (percentage < 75) {
-			colorTheme = 'charts.blue'; // Blue
+			badge = '▤'; // Half filled
 		} else {
-			colorTheme = 'charts.green'; // Green
+			badge = '■'; // Full square
 		}
 
 		return {
-			badge: '■',
+			badge: badge,
 			tooltip: `${percentage}% of lines are masked`,
-			color: new vscode.ThemeColor(colorTheme)
+			color: new vscode.ThemeColor('foreground')
 		};
 	}
 
