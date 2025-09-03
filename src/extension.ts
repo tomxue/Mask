@@ -671,6 +671,183 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
+	let findAllReferencesAndExpand = vscode.commands.registerCommand('mask.findAllReferencesAndExpand', async () => {
+		const editor = vscode.window.activeTextEditor;
+		if (!editor) {
+			vscode.window.showErrorMessage('No active editor found');
+			return;
+		}
+
+		// Store current position
+		const originalPosition = editor.selection.active;
+		const originalDocument = editor.document;
+
+		try {
+			// Execute Find All References
+			await vscode.commands.executeCommand('references-view.findReferences', editor.document.uri, originalPosition);
+			
+			// Wait a bit for the references to be found and displayed
+			await new Promise(resolve => setTimeout(resolve, 500));
+
+			// Get reference locations
+			const locations = await vscode.commands.executeCommand('vscode.executeReferenceProvider', 
+				editor.document.uri, originalPosition) as vscode.Location[];
+
+			if (!locations || locations.length === 0) {
+				vscode.window.showInformationMessage('No references found');
+				return;
+			}
+
+			vscode.window.showInformationMessage(`Found ${locations.length} references, expanding all...`);
+
+			// Navigate through each reference to expand the References panel
+			for (let i = 0; i < locations.length; i++) {
+				try {
+					await vscode.commands.executeCommand('references-view.next');
+					// Small delay to allow the UI to update
+					await new Promise(resolve => setTimeout(resolve, 100));
+				} catch (error) {
+					// If references-view.next fails, try goToNextReference as fallback
+					try {
+						await vscode.commands.executeCommand('goToNextReference');
+						await new Promise(resolve => setTimeout(resolve, 100));
+					} catch (fallbackError) {
+						console.log('Failed to navigate to next reference:', fallbackError);
+					}
+				}
+			}
+
+			// Return to original position
+			const originalEditor = vscode.window.visibleTextEditors.find(e => e.document === originalDocument);
+			if (originalEditor) {
+				await vscode.window.showTextDocument(originalDocument);
+				originalEditor.selection = new vscode.Selection(originalPosition, originalPosition);
+				originalEditor.revealRange(new vscode.Range(originalPosition, originalPosition));
+			}
+
+			vscode.window.showInformationMessage('All references expanded successfully!');
+
+		} catch (error) {
+			console.error('Error in findAllReferencesAndExpand:', error);
+			vscode.window.showErrorMessage(`Error expanding references: ${error}`);
+		}
+	});
+
+	let clearAllMask = vscode.commands.registerCommand('mask.clearAllMask', async (uri?: vscode.Uri) => {
+		try {
+			let targetPath: string;
+			
+			// If called from context menu, uri will be provided
+			if (uri) {
+				targetPath = uri.fsPath;
+			} else {
+				// If called from command palette, use workspace folder
+				const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+				if (!workspaceFolder) {
+					vscode.window.showErrorMessage('No workspace folder found');
+					return;
+				}
+				targetPath = workspaceFolder.uri.fsPath;
+			}
+
+			// Confirm with user
+			const answer = await vscode.window.showWarningMessage(
+				`This will remove ALL mask data from files in "${path.basename(targetPath)}" and its subdirectories. This action cannot be undone.`,
+				{ modal: true },
+				'Clear All Masks',
+				'Cancel'
+			);
+
+			if (answer !== 'Clear All Masks') {
+				return;
+			}
+
+			// Show progress
+			await vscode.window.withProgress({
+				location: vscode.ProgressLocation.Notification,
+				title: 'Clearing all masks',
+				cancellable: false
+			}, async (progress) => {
+				progress.report({ increment: 0, message: 'Loading mask storage...' });
+
+				// Load current storage
+				const storageFilePath = getStorageFilePath();
+				let storage: MaskStorage = {};
+				
+				if (fs.existsSync(storageFilePath)) {
+					const data = fs.readFileSync(storageFilePath, 'utf8');
+					storage = JSON.parse(data);
+				}
+
+				progress.report({ increment: 20, message: 'Analyzing files...' });
+
+				// Get all file URIs in the storage that are within the target directory
+				const filesToClear: string[] = [];
+				
+				for (const fileUri of Object.keys(storage)) {
+					try {
+						const uri = vscode.Uri.parse(fileUri);
+						const filePath = uri.fsPath;
+						
+						// Check if file is within the target directory
+						const relativePath = path.relative(targetPath, filePath);
+						if (!relativePath.startsWith('..') && !path.isAbsolute(relativePath)) {
+							filesToClear.push(fileUri);
+						}
+					} catch (error) {
+						console.error(`Error processing URI ${fileUri}:`, error);
+					}
+				}
+
+				if (filesToClear.length === 0) {
+					vscode.window.showInformationMessage('No masked files found in the selected directory');
+					return;
+				}
+
+				progress.report({ increment: 40, message: `Clearing masks from ${filesToClear.length} files...` });
+
+				// Remove entries from storage
+				let clearedCount = 0;
+				for (const fileUri of filesToClear) {
+					delete storage[fileUri];
+					
+					// Also clear from in-memory cache
+					maskedRanges.delete(fileUri);
+					
+					// Clear custom replacement texts
+					const ranges = maskedRanges.get(fileUri) || [];
+					for (const range of ranges) {
+						customReplacements.delete(range.toString() + fileUri);
+					}
+					
+					clearedCount++;
+					progress.report({ 
+						increment: (40 / filesToClear.length), 
+						message: `Cleared ${clearedCount}/${filesToClear.length} files...` 
+					});
+				}
+
+				progress.report({ increment: 80, message: 'Saving changes...' });
+
+				// Save updated storage
+				fs.writeFileSync(storageFilePath, JSON.stringify(storage, null, 2));
+
+				progress.report({ increment: 100, message: 'Complete!' });
+
+				// Refresh decorations for currently open editors
+				refreshDecorations();
+
+				vscode.window.showInformationMessage(
+					`Successfully cleared masks from ${clearedCount} files in "${path.basename(targetPath)}"`
+				);
+			});
+
+		} catch (error) {
+			console.error('Error in clearAllMask:', error);
+			vscode.window.showErrorMessage(`Error clearing masks: ${error}`);
+		}
+	});
+
 	// Handle copy operations
 	let copyHandler = vscode.commands.registerTextEditorCommand('editor.action.clipboardCopyAction', async () => {
 		const editor = vscode.window.activeTextEditor;
@@ -742,6 +919,8 @@ export function activate(context: vscode.ExtensionContext) {
 		markMasked, 
 		unmarkMasked, 
 		changeReplacementText,
+		findAllReferencesAndExpand,
+		clearAllMask,
 		copyHandler,
 		copyWithSyntaxHandler,
 		vscode.window.onDidChangeActiveTextEditor(() => {

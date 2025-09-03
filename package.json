@@ -45,6 +45,14 @@
       {
         "command": "mask.changeReplacementText",
         "title": "Change Mask Replacement Text"
+      },
+      {
+        "command": "mask.findAllReferencesAndExpand",
+        "title": "Find All References and Auto Expand"
+      },
+      {
+        "command": "mask.clearAllMask",
+        "title": "Clear All Masks"
       }
     ],
     "configuration": {
@@ -74,6 +82,13 @@
           "when": "editorHasSelection",
           "group": "1_modification"
         }
+      ],
+      "explorer/context": [
+        {
+          "command": "mask.clearAllMask",
+          "when": "explorerResourceIsFolder",
+          "group": "2_workspace"
+        }
       ]
     },
     "keybindings": [
@@ -97,6 +112,14 @@
         "key": "cmd+c",
         "command": "editor.action.clipboardCopyAction",
         "when": "editorTextFocus"
+      },
+      {
+        "command": "mask.findAllReferencesAndExpand",
+        "key": "ctrl+1",
+        "mac": "cmd+1",
+        "win": "ctrl+1",
+        "linux": "ctrl+1",
+        "when": "editorHasDefinitionProvider && editorTextFocus && !isInEmbeddedEditor"
       }
     ]
   },
