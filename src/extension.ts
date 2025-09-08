@@ -8,6 +8,55 @@ const customReplacements = new Map<string, string>();
 let maskDecoration: vscode.TextEditorDecorationType;
 let fileDecorationProvider: MaskFileDecorationProvider;
 
+function formatTimeAgo(timestamp: number): string {
+	const now = Date.now();
+	const diffMs = now - timestamp;
+	const diffSeconds = Math.floor(diffMs / 1000);
+	const diffMinutes = Math.floor(diffSeconds / 60);
+	const diffHours = Math.floor(diffMinutes / 60);
+	const diffDays = Math.floor(diffHours / 24);
+
+	if (diffSeconds < 60) {
+		return diffSeconds <= 1 ? '刚刚' : `${diffSeconds}秒前`;
+	} else if (diffMinutes < 60) {
+		return `${diffMinutes}分钟前`;
+	} else if (diffHours < 24) {
+		return `${diffHours}小时前`;
+	} else if (diffDays < 30) {
+		return `${diffDays}天前`;
+	} else {
+		const date = new Date(timestamp);
+		return date.toLocaleDateString('zh-CN');
+	}
+}
+
+class MaskHoverProvider implements vscode.HoverProvider {
+	provideHover(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken): vscode.ProviderResult<vscode.Hover> {
+		const fileUri = document.uri.toString();
+		const ranges = maskedRanges.get(fileUri) || [];
+		
+		// Check if the position is within any masked range
+		for (const range of ranges) {
+			if (range.contains(position)) {
+				const existingData = loadExistingMaskData(fileUri);
+				const lastMaskedTime = existingData?.lastMaskedTime;
+				
+				let hoverText = '';
+				if (lastMaskedTime) {
+					hoverText = `⏰ 最后标记时间：${formatTimeAgo(lastMaskedTime)}`;
+				}
+				
+				const markdown = new vscode.MarkdownString(hoverText);
+				markdown.isTrusted = true;
+				
+				return new vscode.Hover(markdown, range);
+			}
+		}
+		
+		return null;
+	}
+}
+
 class MaskFileDecorationProvider implements vscode.FileDecorationProvider {
 	private _onDidChangeFileDecorations = new vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>();
 	readonly onDidChangeFileDecorations = this._onDidChangeFileDecorations.event;
@@ -46,9 +95,18 @@ class MaskFileDecorationProvider implements vscode.FileDecorationProvider {
 			badge = '■'; // Full square
 		}
 
+		// Get last masked time info
+		const existingData = loadExistingMaskData(fileUri);
+		const lastMaskedTime = existingData?.lastMaskedTime;
+		
+		let tooltipText = `${percentage}% of lines are masked`;
+		if (lastMaskedTime) {
+			tooltipText += `\n最后标记时间：${formatTimeAgo(lastMaskedTime)}`;
+		}
+
 		return {
 			badge: badge,
-			tooltip: `${percentage}% of lines are masked`,
+			tooltip: tooltipText,
 			color: new vscode.ThemeColor('foreground')
 		};
 	}
@@ -67,6 +125,7 @@ interface MaskData {
 	fileSize?: number;
 	lineCount?: number;
 	md5Hash?: string;
+	lastMaskedTime?: number; // Unix timestamp
 }
 
 interface MaskStorage {
@@ -272,7 +331,25 @@ function mergeOverlappingRanges(ranges: vscode.Range[], fileUri: string): vscode
 	return mergedRanges;
 }
 
-function saveMasksToFile() {
+function loadExistingMaskData(fileUri: string): MaskData | null {
+	try {
+		const storageFilePath = getStorageFilePath();
+		if (!fs.existsSync(storageFilePath)) {
+			return null;
+		}
+		
+		const data = fs.readFileSync(storageFilePath, 'utf8');
+		const storage: MaskStorage = JSON.parse(data);
+		const matchingStorageKey = findMatchingFileInStorage(fileUri, storage);
+		
+		return matchingStorageKey ? storage[matchingStorageKey] : null;
+	} catch (error) {
+		console.error(`Failed to load existing mask data for ${fileUri}:`, error);
+		return null;
+	}
+}
+
+function saveMasksToFile(updateTimestamp: boolean = false) {
 	try {
 		const storage: MaskStorage = {};
 		
@@ -302,6 +379,8 @@ function saveMasksToFile() {
 				const metadata = calculateFileMetadata(filePath);
 				
 				if (metadata) {
+					// Get existing timestamp if available
+					const existingData = loadExistingMaskData(fileUri);
 					const maskData: MaskData = {
 						ranges: mergedRanges.map(range => ({
 							start: { line: range.start.line, character: range.start.character },
@@ -310,7 +389,8 @@ function saveMasksToFile() {
 						filename: metadata.filename,
 						fileSize: metadata.fileSize,
 						lineCount: metadata.lineCount,
-						md5Hash: metadata.md5Hash
+						md5Hash: metadata.md5Hash,
+						lastMaskedTime: updateTimestamp ? Date.now() : existingData?.lastMaskedTime
 					};
 					storage[fileUri] = maskData;
 					
@@ -613,6 +693,12 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.window.registerFileDecorationProvider(fileDecorationProvider)
 	);
 
+	// Register hover provider for all languages
+	const maskHoverProvider = new MaskHoverProvider();
+	context.subscriptions.push(
+		vscode.languages.registerHoverProvider('*', maskHoverProvider)
+	);
+
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeConfiguration(e => {
 			if (e.affectsConfiguration('mask')) {
@@ -657,7 +743,7 @@ export function activate(context: vscode.ExtensionContext) {
 		const mergedRanges = mergeOverlappingRanges(ranges, fileUri);
 		maskedRanges.set(fileUri, mergedRanges);
 
-		saveMasksToFile();
+		saveMasksToFile(true); // Update timestamp when marking new masks
 		refreshDecorations();
 
 		const changeAction = 'Change Replacement Text';
