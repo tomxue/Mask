@@ -18,16 +18,16 @@ function formatTimeAgo(timestamp: number): string {
 	const diffDays = Math.floor(diffHours / 24);
 
 	if (diffSeconds < 60) {
-		return diffSeconds <= 1 ? '刚刚' : `${diffSeconds}秒前`;
+		return diffSeconds <= 1 ? 'just now' : `${diffSeconds} seconds ago`;
 	} else if (diffMinutes < 60) {
-		return `${diffMinutes}分钟前`;
+		return `${diffMinutes} minutes ago`;
 	} else if (diffHours < 24) {
-		return `${diffHours}小时前`;
+		return `${diffHours} hours ago`;
 	} else if (diffDays < 30) {
-		return `${diffDays}天前`;
+		return `${diffDays} days ago`;
 	} else {
 		const date = new Date(timestamp);
-		return date.toLocaleDateString('zh-CN');
+		return date.toLocaleDateString('en-US');
 	}
 }
 
@@ -43,7 +43,7 @@ class MaskHoverProvider implements vscode.HoverProvider {
 				
 				let hoverText = '';
 				if (lastMaskedTime) {
-					hoverText = `⏰ 最后标记时间：${formatTimeAgo(lastMaskedTime)}`;
+					hoverText = `⏰ Last marked: ${formatTimeAgo(lastMaskedTime)}`;
 				}
 				
 				const markdown = new vscode.MarkdownString(hoverText);
@@ -101,7 +101,7 @@ class MaskFileDecorationProvider implements vscode.FileDecorationProvider {
 		
 		let tooltipText = `${percentage}% of lines are masked`;
 		if (lastMaskedTime) {
-			tooltipText += `\n最后标记时间：${formatTimeAgo(lastMaskedTime)}`;
+			tooltipText += `\nLast marked: ${formatTimeAgo(lastMaskedTime)}`;
 		}
 
 		return {
