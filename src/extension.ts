@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 
 const maskedRanges = new Map<string, vscode.Range[]>();
 const customReplacements = new Map<string, string>();
+const lastMaskedTimes = new Map<string, number>(); // Cache for last masked times
 let maskDecoration: vscode.TextEditorDecorationType;
 let fileDecorationProvider: MaskFileDecorationProvider;
 
@@ -38,8 +39,7 @@ class MaskHoverProvider implements vscode.HoverProvider {
 		// Check if the position is within any masked range
 		for (const range of ranges) {
 			if (range.contains(position)) {
-				const existingData = loadExistingMaskData(fileUri);
-				const lastMaskedTime = existingData?.lastMaskedTime;
+				const lastMaskedTime = lastMaskedTimes.get(fileUri);
 				
 				let hoverText = '';
 				if (lastMaskedTime) {
@@ -95,9 +95,9 @@ class MaskFileDecorationProvider implements vscode.FileDecorationProvider {
 			badge = '■'; // Full square
 		}
 
-		// Get last masked time info
-		const existingData = loadExistingMaskData(fileUri);
-		const lastMaskedTime = existingData?.lastMaskedTime;
+		// Get last masked time info from cache
+		const lastMaskedTime = lastMaskedTimes.get(fileUri);
+		
 		
 		let tooltipText = `${percentage}% of lines are masked`;
 		if (lastMaskedTime) {
@@ -349,7 +349,7 @@ function loadExistingMaskData(fileUri: string): MaskData | null {
 	}
 }
 
-function saveMasksToFile(updateTimestamp: boolean = false) {
+function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: string) {
 	try {
 		const storage: MaskStorage = {};
 		
@@ -381,6 +381,9 @@ function saveMasksToFile(updateTimestamp: boolean = false) {
 				if (metadata) {
 					// Get existing timestamp if available
 					const existingData = loadExistingMaskData(fileUri);
+					// Only update timestamp for the target file
+					const shouldUpdateThisFile = updateTimestamp && (!targetFileUri || targetFileUri === fileUri);
+					const currentTime = shouldUpdateThisFile ? Date.now() : existingData?.lastMaskedTime;
 					const maskData: MaskData = {
 						ranges: mergedRanges.map(range => ({
 							start: { line: range.start.line, character: range.start.character },
@@ -390,9 +393,14 @@ function saveMasksToFile(updateTimestamp: boolean = false) {
 						fileSize: metadata.fileSize,
 						lineCount: metadata.lineCount,
 						md5Hash: metadata.md5Hash,
-						lastMaskedTime: updateTimestamp ? Date.now() : existingData?.lastMaskedTime
+						lastMaskedTime: currentTime
 					};
 					storage[fileUri] = maskData;
+					
+					// Update cache
+					if (currentTime) {
+						lastMaskedTimes.set(fileUri, currentTime);
+					}
 					
 					// Update the in-memory ranges with the merged version
 					maskedRanges.set(fileUri, mergedRanges);
@@ -514,6 +522,11 @@ function loadMasksForSingleFile(fileUri: string): boolean {
 			if (validRanges.length > 0) {
 				maskedRanges.set(fileUri, validRanges);
 				
+				// Initialize cache with timestamp if available
+				if (maskData.lastMaskedTime) {
+					lastMaskedTimes.set(fileUri, maskData.lastMaskedTime);
+				}
+				
 				// If the storage key is different from current file URI, update storage
 				if (matchingStorageKey !== fileUri) {
 					hasChanges = true;
@@ -548,6 +561,7 @@ function loadMasksFromFile() {
 		const storage: MaskStorage = JSON.parse(data);
 		
 		maskedRanges.clear();
+		lastMaskedTimes.clear(); // Clear timestamp cache
 		let hasChanges = false;
 		
 		// Get all currently open files and the active editor
@@ -609,6 +623,11 @@ function loadMasksFromFile() {
 				if (validRanges.length > 0) {
 					maskedRanges.set(openFileUri, validRanges);
 					
+					// Initialize cache with timestamp if available
+					if (maskData.lastMaskedTime) {
+						lastMaskedTimes.set(openFileUri, maskData.lastMaskedTime);
+					}
+					
 					// If the storage key is different from current file URI, update storage
 					if (matchingStorageKey !== openFileUri) {
 						hasChanges = true;
@@ -667,6 +686,11 @@ function loadMasksFromFile() {
 			
 			if (validRanges.length > 0) {
 				maskedRanges.set(fileUri, validRanges);
+				
+				// Initialize cache with timestamp if available
+				if (maskData.lastMaskedTime) {
+					lastMaskedTimes.set(fileUri, maskData.lastMaskedTime);
+				}
 			}
 		}
 		
@@ -743,7 +767,7 @@ export function activate(context: vscode.ExtensionContext) {
 		const mergedRanges = mergeOverlappingRanges(ranges, fileUri);
 		maskedRanges.set(fileUri, mergedRanges);
 
-		saveMasksToFile(true); // Update timestamp when marking new masks
+		saveMasksToFile(true, fileUri); // Update timestamp when marking new masks
 		refreshDecorations();
 
 		const changeAction = 'Change Replacement Text';
@@ -798,6 +822,11 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 		
 		maskedRanges.set(fileUri, newRanges);
+		
+		// If no ranges left, remove timestamp from cache
+		if (newRanges.length === 0) {
+			lastMaskedTimes.delete(fileUri);
+		}
 
 		saveMasksToFile();
 		refreshDecorations();
@@ -960,6 +989,7 @@ export function activate(context: vscode.ExtensionContext) {
 					
 					// Also clear from in-memory cache
 					maskedRanges.delete(fileUri);
+					lastMaskedTimes.delete(fileUri); // Clear timestamp cache
 					
 					// Clear custom replacement texts
 					const ranges = maskedRanges.get(fileUri) || [];
