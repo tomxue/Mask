@@ -351,11 +351,27 @@ function loadExistingMaskData(fileUri: string): MaskData | null {
 
 function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: string) {
 	try {
-		const storage: MaskStorage = {};
-		
+		// First, load existing storage to preserve data for files not currently in memory
+		const storageFilePath = getStorageFilePath();
+		let storage: MaskStorage = {};
+
+		// Read existing storage file if it exists
+		if (fs.existsSync(storageFilePath)) {
+			try {
+				const data = fs.readFileSync(storageFilePath, 'utf8');
+				storage = JSON.parse(data);
+			} catch (error) {
+				console.error('Failed to read existing storage, starting fresh:', error);
+				storage = {};
+			}
+		}
+
+		// Now update storage with current in-memory data
 		for (const [fileUri, ranges] of maskedRanges.entries()) {
-			// Skip entries with empty ranges
+			// If ranges are empty, remove this file from storage (user cleared all marks)
 			if (!ranges || ranges.length === 0) {
+				delete storage[fileUri];
+				lastMaskedTimes.delete(fileUri);
 				continue;
 			}
 			
@@ -379,8 +395,8 @@ function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: strin
 				const metadata = calculateFileMetadata(filePath);
 				
 				if (metadata) {
-					// Get existing timestamp if available
-					const existingData = loadExistingMaskData(fileUri);
+					// Get existing timestamp if available from storage (not from loadExistingMaskData which re-reads the file)
+					const existingData = storage[fileUri];
 					// Only update timestamp for the target file
 					const shouldUpdateThisFile = updateTimestamp && (!targetFileUri || targetFileUri === fileUri);
 					const currentTime = shouldUpdateThisFile ? Date.now() : existingData?.lastMaskedTime;
@@ -405,10 +421,14 @@ function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: strin
 					// Update the in-memory ranges with the merged version
 					maskedRanges.set(fileUri, mergedRanges);
 				}
+			} else {
+				// After merging, no ranges left - remove from storage
+				delete storage[fileUri];
+				lastMaskedTimes.delete(fileUri);
 			}
 		}
-		
-		const storageFilePath = getStorageFilePath();
+
+		// storageFilePath was already retrieved at the beginning of the function
 		fs.writeFileSync(storageFilePath, JSON.stringify(storage, null, 2));
 		
 		// Refresh file decorations after saving
