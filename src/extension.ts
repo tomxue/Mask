@@ -759,46 +759,29 @@ export function activate(context: vscode.ExtensionContext) {
 		const selection = editor.selection;
 		if (selection.isEmpty) return;
 
+		// Get replacement text from workspace state or config
 		let replacementText = context.workspaceState.get<string>('mask.lastUsedText');
-		
+
 		if (!replacementText) {
 			const config = vscode.workspace.getConfiguration('mask');
-			const defaultText = config.get<string>('replacementText') || '[***]';
-			
-			replacementText = await vscode.window.showInputBox({
-				prompt: 'Enter text to show when copying this section (you can change this later in settings)',
-				placeHolder: 'e.g., [***], [API_KEY], etc.',
-				value: defaultText
-			});
-
-			if (!replacementText) return;
+			replacementText = config.get<string>('replacementText') || '[***]';
 			await context.workspaceState.update('mask.lastUsedText', replacementText);
 		}
 
 		const fileUri = editor.document.uri.toString();
 		const ranges = maskedRanges.get(fileUri) || [];
 		const range = new vscode.Range(selection.start, selection.end);
-		
+
 		// Add the new range
 		ranges.push(range);
 		customReplacements.set(range.toString() + fileUri, replacementText);
-		
+
 		// Merge overlapping ranges immediately
 		const mergedRanges = mergeOverlappingRanges(ranges, fileUri);
 		maskedRanges.set(fileUri, mergedRanges);
 
 		saveMasksToFile(true, fileUri); // Update timestamp when marking new masks
 		refreshDecorations();
-
-		const changeAction = 'Change Replacement Text';
-		const action = await vscode.window.showInformationMessage(
-			`Text will be replaced with "${replacementText}". You can change this in settings.`,
-			changeAction
-		);
-
-		if (action === changeAction) {
-			await vscode.commands.executeCommand('workbench.action.openSettings', 'mask.replacementText');
-		}
 	});
 
 	let unmarkMasked = vscode.commands.registerCommand('mask.unmarkMasked', () => {
