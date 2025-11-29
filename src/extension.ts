@@ -445,38 +445,50 @@ function validateAndCleanMaskRanges(fileUri: string, ranges: vscode.Range[]): vs
 		if (uri.scheme !== 'file') {
 			return ranges; // Only validate local files
 		}
-		
-		const filePath = uri.fsPath;
-		if (!fs.existsSync(filePath)) {
-			console.log(`File no longer exists, removing all mask ranges: ${filePath}`);
-			return [];
+
+		// Try to get the document from open editors first (to use current content, not disk content)
+		const openDoc = vscode.workspace.textDocuments.find(doc => doc.uri.toString() === fileUri);
+		let maxLine: number;
+		let lineCount: number;
+
+		if (openDoc) {
+			// Use open document content (includes unsaved changes)
+			maxLine = openDoc.lineCount - 1;
+			lineCount = openDoc.lineCount;
+		} else {
+			// Fallback to reading from disk if document is not open
+			const filePath = uri.fsPath;
+			if (!fs.existsSync(filePath)) {
+				console.log(`File no longer exists, removing all mask ranges: ${filePath}`);
+				return [];
+			}
+
+			const fileContent = fs.readFileSync(filePath, 'utf8');
+			const fileLines = fileContent.split('\n');
+			maxLine = fileLines.length - 1;
+			lineCount = fileLines.length;
 		}
-		
-		// Get actual file line count
-		const fileContent = fs.readFileSync(filePath, 'utf8');
-		const fileLines = fileContent.split('\n');
-		const maxLine = fileLines.length - 1; // 0-based indexing
-		
+
 		// Filter out ranges that exceed file bounds
 		const validRanges = ranges.filter(range => {
 			const startValid = range.start.line <= maxLine;
 			const endValid = range.end.line <= maxLine;
-			
+
 			if (!startValid || !endValid) {
-				console.log(`Removing invalid mask range: lines ${range.start.line}-${range.end.line} (file has ${fileLines.length} lines)`);
+				console.log(`Removing invalid mask range: lines ${range.start.line}-${range.end.line} (file has ${lineCount} lines)`);
 				// Also remove any custom replacement text for this range
 				customReplacements.delete(range.toString() + fileUri);
 				return false;
 			}
-			
+
 			return true;
 		});
-		
+
 		// If ranges were removed, update the storage file
 		if (validRanges.length !== ranges.length) {
-			console.log(`Cleaned ${ranges.length - validRanges.length} invalid ranges from ${filePath}`);
+			console.log(`Cleaned ${ranges.length - validRanges.length} invalid ranges from ${uri.fsPath || fileUri}`);
 		}
-		
+
 		return validRanges;
 	} catch (error) {
 		console.error(`Error validating ranges for ${fileUri}:`, error);
@@ -781,19 +793,23 @@ export function activate(context: vscode.ExtensionContext) {
 		maskedRanges.set(fileUri, mergedRanges);
 
 		saveMasksToFile(true, fileUri); // Update timestamp when marking new masks
+
+		// Save the current document to persist changes
+		await editor.document.save();
+
 		refreshDecorations();
 	});
 
-	let unmarkMasked = vscode.commands.registerCommand('mask.unmarkMasked', () => {
+	let unmarkMasked = vscode.commands.registerCommand('mask.unmarkMasked', async () => {
 		const editor = vscode.window.activeTextEditor;
 		if (!editor) return;
 
 		const selection = editor.selection;
 		const fileUri = editor.document.uri.toString();
 		const ranges = maskedRanges.get(fileUri) || [];
-		
+
 		const newRanges: vscode.Range[] = [];
-		
+
 		for (const range of ranges) {
 			const intersection = range.intersection(selection);
 			if (!intersection) {
@@ -802,36 +818,40 @@ export function activate(context: vscode.ExtensionContext) {
 			} else {
 				// There is intersection, need to split the range
 				const originalReplacementText = customReplacements.get(range.toString() + fileUri) || '[***]';
-				
+
 				// Remove the original range's replacement text
 				customReplacements.delete(range.toString() + fileUri);
-				
+
 				// Check if there's a part before the intersection
 				if (range.start.isBefore(selection.start)) {
 					const beforeRange = new vscode.Range(range.start, selection.start);
 					newRanges.push(beforeRange);
 					customReplacements.set(beforeRange.toString() + fileUri, originalReplacementText);
 				}
-				
+
 				// Check if there's a part after the intersection
 				if (selection.end.isBefore(range.end)) {
 					const afterRange = new vscode.Range(selection.end, range.end);
 					newRanges.push(afterRange);
 					customReplacements.set(afterRange.toString() + fileUri, originalReplacementText);
 				}
-				
+
 				// The intersection part is removed (not added to newRanges)
 			}
 		}
-		
+
 		maskedRanges.set(fileUri, newRanges);
-		
+
 		// If no ranges left, remove timestamp from cache
 		if (newRanges.length === 0) {
 			lastMaskedTimes.delete(fileUri);
 		}
 
 		saveMasksToFile();
+
+		// Save the current document to persist changes
+		await editor.document.save();
+
 		refreshDecorations();
 	});
 
@@ -1097,31 +1117,43 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 
 	context.subscriptions.push(
-		markMasked, 
-		unmarkMasked, 
+		markMasked,
+		unmarkMasked,
 		changeReplacementText,
 		findAllReferencesAndExpand,
 		clearAllMask,
 		copyHandler,
 		copyWithSyntaxHandler,
-		vscode.window.onDidChangeActiveTextEditor(() => {
-			loadMasksFromFile();
+		vscode.window.onDidChangeActiveTextEditor((editor) => {
+			// Only refresh decorations when switching editors, don't reload all masks
+			// This prevents unnecessary clearing and reloading which can cause mask loss
+			if (editor) {
+				const fileUri = editor.document.uri.toString();
+				// Load masks for this specific file if not already in memory
+				if (!maskedRanges.has(fileUri)) {
+					loadMasksForSingleFile(fileUri);
+				}
+			}
 			refreshDecorations();
 		}),
-		vscode.workspace.onDidOpenTextDocument(() => {
-			loadMasksFromFile();
+		vscode.workspace.onDidOpenTextDocument((document) => {
+			// Only load masks for the newly opened document, don't reload all masks
+			const fileUri = document.uri.toString();
+			if (!maskedRanges.has(fileUri)) {
+				loadMasksForSingleFile(fileUri);
+			}
 			refreshDecorations();
 		}),
 		vscode.workspace.onDidSaveTextDocument((document) => {
 			const fileUri = document.uri.toString();
 			const ranges = maskedRanges.get(fileUri);
-			
+
 			// Only update metadata if this file has mask ranges
 			if (ranges && ranges.length > 0) {
 				// Update metadata for this specific file
 				const filePath = document.uri.fsPath;
 				const metadata = calculateFileMetadata(filePath);
-				
+
 				if (metadata) {
 					// Save the masks with updated metadata
 					saveMasksToFile();
