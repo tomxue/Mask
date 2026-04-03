@@ -3,11 +3,54 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 
+type MarkType = 'masked' | 'toRead';
+
 const maskedRanges = new Map<string, vscode.Range[]>();
+const toReadRanges = new Map<string, vscode.Range[]>();
 const customReplacements = new Map<string, string>();
 const lastMaskedTimes = new Map<string, number>(); // Cache for last masked times
+const lastToReadTimes = new Map<string, number>();
 let maskDecoration: vscode.TextEditorDecorationType;
+let toReadDecoration: vscode.TextEditorDecorationType;
 let fileDecorationProvider: MaskFileDecorationProvider;
+
+function getRangesMap(markType: MarkType): Map<string, vscode.Range[]> {
+	return markType === 'masked' ? maskedRanges : toReadRanges;
+}
+
+function getTimestampMap(markType: MarkType): Map<string, number> {
+	return markType === 'masked' ? lastMaskedTimes : lastToReadTimes;
+}
+
+function getRangeStorageKey(range: vscode.Range, fileUri: string, markType: MarkType): string {
+	return `${markType}:${fileUri}:${range.toString()}`;
+}
+
+function getMarkLabel(markType: MarkType): string {
+	return markType === 'masked' ? 'Masked' : 'To Read';
+}
+
+function getCombinedRanges(fileUri: string): vscode.Range[] {
+	return [
+		...(maskedRanges.get(fileUri) || []),
+		...(toReadRanges.get(fileUri) || [])
+	];
+}
+
+function getLatestMarkedTime(fileUri: string): number | undefined {
+	const maskedTime = lastMaskedTimes.get(fileUri);
+	const toReadTime = lastToReadTimes.get(fileUri);
+
+	if (maskedTime === undefined) {
+		return toReadTime;
+	}
+
+	if (toReadTime === undefined) {
+		return maskedTime;
+	}
+
+	return Math.max(maskedTime, toReadTime);
+}
 
 function formatTimeAgo(timestamp: number): string {
 	const now = Date.now();
@@ -34,22 +77,24 @@ function formatTimeAgo(timestamp: number): string {
 class MaskHoverProvider implements vscode.HoverProvider {
 	provideHover(document: vscode.TextDocument, position: vscode.Position, token: vscode.CancellationToken): vscode.ProviderResult<vscode.Hover> {
 		const fileUri = document.uri.toString();
-		const ranges = maskedRanges.get(fileUri) || [];
-		
-		// Check if the position is within any masked range
-		for (const range of ranges) {
-			if (range.contains(position)) {
-				const lastMaskedTime = lastMaskedTimes.get(fileUri);
-				
-				let hoverText = '';
-				if (lastMaskedTime) {
-					hoverText = `⏰ Last marked: ${formatTimeAgo(lastMaskedTime)}`;
+
+		for (const markType of ['masked', 'toRead'] as const) {
+			const ranges = getRangesMap(markType).get(fileUri) || [];
+
+			for (const range of ranges) {
+				if (range.contains(position)) {
+					const lastMarkedTime = getTimestampMap(markType).get(fileUri);
+					let hoverText = `$(tag) ${getMarkLabel(markType)}`;
+
+					if (lastMarkedTime) {
+						hoverText += `\n\n⏰ Last marked: ${formatTimeAgo(lastMarkedTime)}`;
+					}
+
+					const markdown = new vscode.MarkdownString(hoverText);
+					markdown.isTrusted = true;
+
+					return new vscode.Hover(markdown, range);
 				}
-				
-				const markdown = new vscode.MarkdownString(hoverText);
-				markdown.isTrusted = true;
-				
-				return new vscode.Hover(markdown, range);
 			}
 		}
 		
@@ -68,7 +113,7 @@ class MaskFileDecorationProvider implements vscode.FileDecorationProvider {
 		}
 
 		const fileUri = uri.toString();
-		const ranges = maskedRanges.get(fileUri);
+		const ranges = getCombinedRanges(fileUri);
 		
 		console.log(`Checking decoration for ${fileUri}: ${ranges ? ranges.length : 0} ranges`);
 		
@@ -76,7 +121,7 @@ class MaskFileDecorationProvider implements vscode.FileDecorationProvider {
 			return undefined;
 		}
 
-		const percentage = calculateMaskPercentage(fileUri);
+		const percentage = calculateMarkedPercentage(fileUri);
 		console.log(`Calculated percentage for ${path.basename(uri.fsPath)}: ${percentage}%`);
 		
 		if (percentage === 0) {
@@ -95,13 +140,15 @@ class MaskFileDecorationProvider implements vscode.FileDecorationProvider {
 			badge = '■'; // Full square
 		}
 
-		// Get last masked time info from cache
-		const lastMaskedTime = lastMaskedTimes.get(fileUri);
-		
-		
-		let tooltipText = `${percentage}% of lines are masked`;
-		if (lastMaskedTime) {
-			tooltipText += `\nLast marked: ${formatTimeAgo(lastMaskedTime)}`;
+		const maskedCount = maskedRanges.get(fileUri)?.length || 0;
+		const toReadCount = toReadRanges.get(fileUri)?.length || 0;
+		const lastMarkedTime = getLatestMarkedTime(fileUri);
+
+		let tooltipText = `${percentage}% of lines are marked`;
+		tooltipText += `\nMasked ranges: ${maskedCount}`;
+		tooltipText += `\nTo Read ranges: ${toReadCount}`;
+		if (lastMarkedTime) {
+			tooltipText += `\nLast marked: ${formatTimeAgo(lastMarkedTime)}`;
 		}
 
 		return {
@@ -121,11 +168,16 @@ interface MaskData {
 		start: { line: number; character: number };
 		end: { line: number; character: number };
 	}>;
+	toReadRanges?: Array<{
+		start: { line: number; character: number };
+		end: { line: number; character: number };
+	}>;
 	filename?: string;
 	fileSize?: number;
 	lineCount?: number;
 	md5Hash?: string;
 	lastMaskedTime?: number; // Unix timestamp
+	lastToReadTime?: number;
 }
 
 interface MaskStorage {
@@ -269,8 +321,10 @@ function getStorageFilePath(): string {
 	return path.join(vscodeDir, 'mask-storage.json');
 }
 
-function mergeOverlappingRanges(ranges: vscode.Range[], fileUri: string): vscode.Range[] {
-	if (ranges.length <= 1) return ranges;
+function mergeOverlappingRanges(ranges: vscode.Range[], fileUri: string, markType: MarkType): vscode.Range[] {
+	if (ranges.length <= 1) {
+		return ranges;
+	}
 	
 	// Sort ranges by start position
 	const sortedRanges = ranges.sort((a, b) => {
@@ -282,11 +336,11 @@ function mergeOverlappingRanges(ranges: vscode.Range[], fileUri: string): vscode
 	
 	const mergedRanges: vscode.Range[] = [];
 	let currentRange = sortedRanges[0];
-	let currentReplacementText = customReplacements.get(currentRange.toString() + fileUri) || '[***]';
+	let currentReplacementText = customReplacements.get(getRangeStorageKey(currentRange, fileUri, markType)) || '[***]';
 	
 	for (let i = 1; i < sortedRanges.length; i++) {
 		const nextRange = sortedRanges[i];
-		const nextReplacementText = customReplacements.get(nextRange.toString() + fileUri) || '[***]';
+		const nextReplacementText = customReplacements.get(getRangeStorageKey(nextRange, fileUri, markType)) || '[***]';
 		
 		// Check if ranges overlap or are adjacent
 		const currentEnd = currentRange.end;
@@ -306,8 +360,8 @@ function mergeOverlappingRanges(ranges: vscode.Range[], fileUri: string): vscode
 			const mergedRange = new vscode.Range(currentRange.start, newEnd);
 			
 			// Remove old replacement texts
-			customReplacements.delete(currentRange.toString() + fileUri);
-			customReplacements.delete(nextRange.toString() + fileUri);
+			customReplacements.delete(getRangeStorageKey(currentRange, fileUri, markType));
+			customReplacements.delete(getRangeStorageKey(nextRange, fileUri, markType));
 			
 			// Use the replacement text from the first range, or combine if different
 			let mergedReplacementText = currentReplacementText;
@@ -316,7 +370,7 @@ function mergeOverlappingRanges(ranges: vscode.Range[], fileUri: string): vscode
 			}
 			
 			currentRange = mergedRange;
-			customReplacements.set(currentRange.toString() + fileUri, mergedReplacementText);
+			customReplacements.set(getRangeStorageKey(currentRange, fileUri, markType), mergedReplacementText);
 		} else {
 			// No overlap, add current range to result and move to next
 			mergedRanges.push(currentRange);
@@ -329,6 +383,87 @@ function mergeOverlappingRanges(ranges: vscode.Range[], fileUri: string): vscode
 	mergedRanges.push(currentRange);
 	
 	return mergedRanges;
+}
+
+function dedupeRanges(ranges: vscode.Range[]): vscode.Range[] {
+	return ranges.filter((range, index, array) => {
+		return array.findIndex(r =>
+			r.start.line === range.start.line &&
+			r.start.character === range.start.character &&
+			r.end.line === range.end.line &&
+			r.end.character === range.end.character
+		) === index;
+	});
+}
+
+function removeSelectionFromMarkType(fileUri: string, selection: vscode.Selection | vscode.Range, markType: MarkType): vscode.Range[] {
+	const rangesMap = getRangesMap(markType);
+	const ranges = rangesMap.get(fileUri) || [];
+	const newRanges: vscode.Range[] = [];
+
+	for (const range of ranges) {
+		const intersection = range.intersection(selection);
+		if (!intersection) {
+			newRanges.push(range);
+			continue;
+		}
+
+		const originalReplacementText = customReplacements.get(getRangeStorageKey(range, fileUri, markType)) || '[***]';
+		customReplacements.delete(getRangeStorageKey(range, fileUri, markType));
+
+		if (range.start.isBefore(selection.start)) {
+			const beforeRange = new vscode.Range(range.start, selection.start);
+			newRanges.push(beforeRange);
+			customReplacements.set(getRangeStorageKey(beforeRange, fileUri, markType), originalReplacementText);
+		}
+
+		if (selection.end.isBefore(range.end)) {
+			const afterRange = new vscode.Range(selection.end, range.end);
+			newRanges.push(afterRange);
+			customReplacements.set(getRangeStorageKey(afterRange, fileUri, markType), originalReplacementText);
+		}
+	}
+
+	if (newRanges.length > 0) {
+		rangesMap.set(fileUri, newRanges);
+	} else {
+		rangesMap.delete(fileUri);
+		getTimestampMap(markType).delete(fileUri);
+	}
+
+	return newRanges;
+}
+
+async function markSelection(
+	context: vscode.ExtensionContext,
+	markType: MarkType,
+	selection: vscode.Selection,
+	editor: vscode.TextEditor
+): Promise<void> {
+	const fileUri = editor.document.uri.toString();
+	const rangesMap = getRangesMap(markType);
+	const oppositeType: MarkType = markType === 'masked' ? 'toRead' : 'masked';
+
+	let replacementText = context.workspaceState.get<string>('mask.lastUsedText');
+	if (!replacementText) {
+		const config = vscode.workspace.getConfiguration('mask');
+		replacementText = config.get<string>('replacementText') || '[***]';
+		await context.workspaceState.update('mask.lastUsedText', replacementText);
+	}
+
+	removeSelectionFromMarkType(fileUri, selection, oppositeType);
+
+	const ranges = rangesMap.get(fileUri) || [];
+	const range = new vscode.Range(selection.start, selection.end);
+	ranges.push(range);
+	customReplacements.set(getRangeStorageKey(range, fileUri, markType), replacementText);
+
+	const mergedRanges = mergeOverlappingRanges(dedupeRanges(ranges), fileUri, markType);
+	rangesMap.set(fileUri, mergedRanges);
+
+	saveMasksToFile(true, fileUri, markType);
+	await editor.document.save();
+	refreshDecorations();
 }
 
 function loadExistingMaskData(fileUri: string): MaskData | null {
@@ -349,7 +484,7 @@ function loadExistingMaskData(fileUri: string): MaskData | null {
 	}
 }
 
-function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: string) {
+function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: string, targetMarkType?: MarkType) {
 	try {
 		// First, load existing storage to preserve data for files not currently in memory
 		const storageFilePath = getStorageFilePath();
@@ -366,65 +501,74 @@ function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: strin
 			}
 		}
 
-		// Now update storage with current in-memory data
-		for (const [fileUri, ranges] of maskedRanges.entries()) {
-			// If ranges are empty, remove this file from storage (user cleared all marks)
-			if (!ranges || ranges.length === 0) {
-				delete storage[fileUri];
+		const allFileUris = new Set<string>([
+			...Object.keys(storage),
+			...maskedRanges.keys(),
+			...toReadRanges.keys()
+		]);
+
+		for (const fileUri of allFileUris) {
+			const maskedFileRanges = mergeOverlappingRanges(dedupeRanges(maskedRanges.get(fileUri) || []), fileUri, 'masked');
+			const toReadFileRanges = mergeOverlappingRanges(dedupeRanges(toReadRanges.get(fileUri) || []), fileUri, 'toRead');
+
+			if (maskedFileRanges.length > 0) {
+				maskedRanges.set(fileUri, maskedFileRanges);
+			} else {
+				maskedRanges.delete(fileUri);
 				lastMaskedTimes.delete(fileUri);
+			}
+
+			if (toReadFileRanges.length > 0) {
+				toReadRanges.set(fileUri, toReadFileRanges);
+			} else {
+				toReadRanges.delete(fileUri);
+				lastToReadTimes.delete(fileUri);
+			}
+
+			if (maskedFileRanges.length === 0 && toReadFileRanges.length === 0) {
+				delete storage[fileUri];
 				continue;
 			}
-			
-			// First remove exact duplicates, then merge overlapping ranges
-			const uniqueRanges = ranges.filter((range, index, array) => {
-				return array.findIndex(r => 
-					r.start.line === range.start.line &&
-					r.start.character === range.start.character &&
-					r.end.line === range.end.line &&
-					r.end.character === range.end.character
-				) === index;
-			});
-			
-			const mergedRanges = mergeOverlappingRanges(uniqueRanges, fileUri);
-			
-			// Only save if there are still ranges after merging
-			if (mergedRanges.length > 0) {
-				// Get file metadata
-				const uri = vscode.Uri.parse(fileUri);
-				const filePath = uri.fsPath;
-				const metadata = calculateFileMetadata(filePath);
-				
-				if (metadata) {
-					// Get existing timestamp if available from storage (not from loadExistingMaskData which re-reads the file)
-					const existingData = storage[fileUri];
-					// Only update timestamp for the target file
-					const shouldUpdateThisFile = updateTimestamp && (!targetFileUri || targetFileUri === fileUri);
-					const currentTime = shouldUpdateThisFile ? Date.now() : existingData?.lastMaskedTime;
-					const maskData: MaskData = {
-						ranges: mergedRanges.map(range => ({
-							start: { line: range.start.line, character: range.start.character },
-							end: { line: range.end.line, character: range.end.character }
-						})),
-						filename: metadata.filename,
-						fileSize: metadata.fileSize,
-						lineCount: metadata.lineCount,
-						md5Hash: metadata.md5Hash,
-						lastMaskedTime: currentTime
-					};
-					storage[fileUri] = maskData;
-					
-					// Update cache
-					if (currentTime) {
-						lastMaskedTimes.set(fileUri, currentTime);
-					}
-					
-					// Update the in-memory ranges with the merged version
-					maskedRanges.set(fileUri, mergedRanges);
-				}
-			} else {
-				// After merging, no ranges left - remove from storage
-				delete storage[fileUri];
-				lastMaskedTimes.delete(fileUri);
+
+			const uri = vscode.Uri.parse(fileUri);
+			const filePath = uri.fsPath;
+			const metadata = calculateFileMetadata(filePath);
+			if (!metadata) {
+				continue;
+			}
+
+			const existingData = storage[fileUri];
+			const shouldUpdateThisFile = updateTimestamp && (!targetFileUri || targetFileUri === fileUri);
+			const maskedTime = shouldUpdateThisFile && targetMarkType === 'masked'
+				? Date.now()
+				: existingData?.lastMaskedTime;
+			const toReadTime = shouldUpdateThisFile && targetMarkType === 'toRead'
+				? Date.now()
+				: existingData?.lastToReadTime;
+
+			storage[fileUri] = {
+				ranges: maskedFileRanges.map(range => ({
+					start: { line: range.start.line, character: range.start.character },
+					end: { line: range.end.line, character: range.end.character }
+				})),
+				toReadRanges: toReadFileRanges.map(range => ({
+					start: { line: range.start.line, character: range.start.character },
+					end: { line: range.end.line, character: range.end.character }
+				})),
+				filename: metadata.filename,
+				fileSize: metadata.fileSize,
+				lineCount: metadata.lineCount,
+				md5Hash: metadata.md5Hash,
+				lastMaskedTime: maskedTime,
+				lastToReadTime: toReadTime
+			};
+
+			if (maskedTime) {
+				lastMaskedTimes.set(fileUri, maskedTime);
+			}
+
+			if (toReadTime) {
+				lastToReadTimes.set(fileUri, toReadTime);
 			}
 		}
 
@@ -438,7 +582,7 @@ function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: strin
 	}
 }
 
-function validateAndCleanMaskRanges(fileUri: string, ranges: vscode.Range[]): vscode.Range[] {
+function validateAndCleanMaskRanges(fileUri: string, ranges: vscode.Range[], markType: MarkType): vscode.Range[] {
 	try {
 		// Convert URI to file path
 		const uri = vscode.Uri.parse(fileUri);
@@ -477,7 +621,7 @@ function validateAndCleanMaskRanges(fileUri: string, ranges: vscode.Range[]): vs
 			if (!startValid || !endValid) {
 				console.log(`Removing invalid mask range: lines ${range.start.line}-${range.end.line} (file has ${lineCount} lines)`);
 				// Also remove any custom replacement text for this range
-				customReplacements.delete(range.toString() + fileUri);
+				customReplacements.delete(getRangeStorageKey(range, fileUri, markType));
 				return false;
 			}
 
@@ -511,9 +655,10 @@ function loadMasksForSingleFile(fileUri: string): boolean {
 		
 		if (matchingStorageKey) {
 			const maskData = storage[matchingStorageKey];
-			
-			// Skip entries with empty ranges
-			if (!maskData.ranges || maskData.ranges.length === 0) {
+			const storedMaskedRanges = maskData.ranges || [];
+			const storedToReadRanges = maskData.toReadRanges || [];
+
+			if (storedMaskedRanges.length === 0 && storedToReadRanges.length === 0) {
 				return false;
 			}
 			
@@ -536,7 +681,15 @@ function loadMasksForSingleFile(fileUri: string): boolean {
 				}
 			}
 			
-			const ranges = maskData.ranges.map(rangeData => {
+			const maskedFileRanges = storedMaskedRanges.map(rangeData => {
+				const range = new vscode.Range(
+					new vscode.Position(rangeData.start.line, rangeData.start.character),
+					new vscode.Position(rangeData.end.line, rangeData.end.character)
+				);
+				return range;
+			});
+
+			const toReadFileRanges = storedToReadRanges.map(rangeData => {
 				const range = new vscode.Range(
 					new vscode.Position(rangeData.start.line, rangeData.start.character),
 					new vscode.Position(rangeData.end.line, rangeData.end.character)
@@ -544,34 +697,43 @@ function loadMasksForSingleFile(fileUri: string): boolean {
 				return range;
 			});
 			
-			// Validate and clean ranges against actual file content
-			const validRanges = validateAndCleanMaskRanges(fileUri, ranges);
+			const validMaskedRanges = validateAndCleanMaskRanges(fileUri, maskedFileRanges, 'masked');
+			const validToReadRanges = validateAndCleanMaskRanges(fileUri, toReadFileRanges, 'toRead');
 			
-			if (validRanges.length !== ranges.length) {
+			if (validMaskedRanges.length !== maskedFileRanges.length || validToReadRanges.length !== toReadFileRanges.length) {
 				hasChanges = true;
 			}
 			
-			if (validRanges.length > 0) {
-				maskedRanges.set(fileUri, validRanges);
-				
-				// Initialize cache with timestamp if available
-				if (maskData.lastMaskedTime) {
-					lastMaskedTimes.set(fileUri, maskData.lastMaskedTime);
-				}
-				
-				// If the storage key is different from current file URI, update storage
-				if (matchingStorageKey !== fileUri) {
-					hasChanges = true;
-					console.log(`Found matching file by metadata: ${matchingStorageKey} -> ${fileUri}`);
-				}
-				
-				// Save changes if any
-				if (hasChanges) {
-					saveMasksToFile();
-				}
-				
-				return true;
+			if (validMaskedRanges.length > 0) {
+				maskedRanges.set(fileUri, validMaskedRanges);
+			} else {
+				maskedRanges.delete(fileUri);
 			}
+
+			if (validToReadRanges.length > 0) {
+				toReadRanges.set(fileUri, validToReadRanges);
+			} else {
+				toReadRanges.delete(fileUri);
+			}
+
+			if (maskData.lastMaskedTime) {
+				lastMaskedTimes.set(fileUri, maskData.lastMaskedTime);
+			}
+
+			if (maskData.lastToReadTime) {
+				lastToReadTimes.set(fileUri, maskData.lastToReadTime);
+			}
+
+			if (matchingStorageKey !== fileUri) {
+				hasChanges = true;
+				console.log(`Found matching file by metadata: ${matchingStorageKey} -> ${fileUri}`);
+			}
+
+			if (hasChanges) {
+				saveMasksToFile();
+			}
+
+			return validMaskedRanges.length > 0 || validToReadRanges.length > 0;
 		}
 		
 		return false;
@@ -594,6 +756,8 @@ function loadMasksFromFile() {
 		
 		maskedRanges.clear();
 		lastMaskedTimes.clear(); // Clear timestamp cache
+		toReadRanges.clear();
+		lastToReadTimes.clear();
 		let hasChanges = false;
 		
 		// Get all currently open files and the active editor
@@ -613,9 +777,10 @@ function loadMasksFromFile() {
 			
 			if (matchingStorageKey) {
 				const maskData = storage[matchingStorageKey];
-				
-				// Skip entries with empty ranges
-				if (!maskData.ranges || maskData.ranges.length === 0) {
+				const storedMaskedRanges = maskData.ranges || [];
+				const storedToReadRanges = maskData.toReadRanges || [];
+
+				if (storedMaskedRanges.length === 0 && storedToReadRanges.length === 0) {
 					hasChanges = true;
 					continue;
 				}
@@ -637,7 +802,15 @@ function loadMasksFromFile() {
 					}
 				}
 				
-				const ranges = maskData.ranges.map(rangeData => {
+				const maskedFileRanges = storedMaskedRanges.map(rangeData => {
+					const range = new vscode.Range(
+						new vscode.Position(rangeData.start.line, rangeData.start.character),
+						new vscode.Position(rangeData.end.line, rangeData.end.character)
+					);
+					return range;
+				});
+
+				const toReadFileRanges = storedToReadRanges.map(rangeData => {
 					const range = new vscode.Range(
 						new vscode.Position(rangeData.start.line, rangeData.start.character),
 						new vscode.Position(rangeData.end.line, rangeData.end.character)
@@ -645,25 +818,31 @@ function loadMasksFromFile() {
 					return range;
 				});
 				
-				// Validate and clean ranges against actual file content
-				const validRanges = validateAndCleanMaskRanges(openFileUri, ranges);
+				const validMaskedRanges = validateAndCleanMaskRanges(openFileUri, maskedFileRanges, 'masked');
+				const validToReadRanges = validateAndCleanMaskRanges(openFileUri, toReadFileRanges, 'toRead');
 				
-				if (validRanges.length !== ranges.length) {
+				if (validMaskedRanges.length !== maskedFileRanges.length || validToReadRanges.length !== toReadFileRanges.length) {
 					hasChanges = true;
 				}
 				
-				if (validRanges.length > 0) {
-					maskedRanges.set(openFileUri, validRanges);
-					
-					// Initialize cache with timestamp if available
-					if (maskData.lastMaskedTime) {
-						lastMaskedTimes.set(openFileUri, maskData.lastMaskedTime);
-					}
-					
-					// If the storage key is different from current file URI, update storage
-					if (matchingStorageKey !== openFileUri) {
-						hasChanges = true;
-					}
+				if (validMaskedRanges.length > 0) {
+					maskedRanges.set(openFileUri, validMaskedRanges);
+				}
+
+				if (validToReadRanges.length > 0) {
+					toReadRanges.set(openFileUri, validToReadRanges);
+				}
+
+				if (maskData.lastMaskedTime) {
+					lastMaskedTimes.set(openFileUri, maskData.lastMaskedTime);
+				}
+
+				if (maskData.lastToReadTime) {
+					lastToReadTimes.set(openFileUri, maskData.lastToReadTime);
+				}
+
+				if (matchingStorageKey !== openFileUri) {
+					hasChanges = true;
 				}
 				
 				// Mark this storage key as processed
@@ -678,8 +857,10 @@ function loadMasksFromFile() {
 				continue;
 			}
 			
-			// Skip entries with empty ranges
-			if (!maskData.ranges || maskData.ranges.length === 0) {
+			const storedMaskedRanges = maskData.ranges || [];
+			const storedToReadRanges = maskData.toReadRanges || [];
+
+			if (storedMaskedRanges.length === 0 && storedToReadRanges.length === 0) {
 				hasChanges = true;
 				continue;
 			}
@@ -701,7 +882,15 @@ function loadMasksFromFile() {
 				}
 			}
 			
-			const ranges = maskData.ranges.map(rangeData => {
+			const maskedFileRanges = storedMaskedRanges.map(rangeData => {
+				const range = new vscode.Range(
+					new vscode.Position(rangeData.start.line, rangeData.start.character),
+					new vscode.Position(rangeData.end.line, rangeData.end.character)
+				);
+				return range;
+			});
+
+			const toReadFileRanges = storedToReadRanges.map(rangeData => {
 				const range = new vscode.Range(
 					new vscode.Position(rangeData.start.line, rangeData.start.character),
 					new vscode.Position(rangeData.end.line, rangeData.end.character)
@@ -709,20 +898,27 @@ function loadMasksFromFile() {
 				return range;
 			});
 			
-			// Validate and clean ranges against actual file content
-			const validRanges = validateAndCleanMaskRanges(fileUri, ranges);
+			const validMaskedRanges = validateAndCleanMaskRanges(fileUri, maskedFileRanges, 'masked');
+			const validToReadRanges = validateAndCleanMaskRanges(fileUri, toReadFileRanges, 'toRead');
 			
-			if (validRanges.length !== ranges.length) {
+			if (validMaskedRanges.length !== maskedFileRanges.length || validToReadRanges.length !== toReadFileRanges.length) {
 				hasChanges = true;
 			}
 			
-			if (validRanges.length > 0) {
-				maskedRanges.set(fileUri, validRanges);
-				
-				// Initialize cache with timestamp if available
-				if (maskData.lastMaskedTime) {
-					lastMaskedTimes.set(fileUri, maskData.lastMaskedTime);
-				}
+			if (validMaskedRanges.length > 0) {
+				maskedRanges.set(fileUri, validMaskedRanges);
+			}
+
+			if (validToReadRanges.length > 0) {
+				toReadRanges.set(fileUri, validToReadRanges);
+			}
+
+			if (maskData.lastMaskedTime) {
+				lastMaskedTimes.set(fileUri, maskData.lastMaskedTime);
+			}
+
+			if (maskData.lastToReadTime) {
+				lastToReadTimes.set(fileUri, maskData.lastToReadTime);
 			}
 		}
 		
@@ -766,86 +962,43 @@ export function activate(context: vscode.ExtensionContext) {
 
 	let markMasked = vscode.commands.registerCommand('mask.markMasked', async () => {
 		const editor = vscode.window.activeTextEditor;
-		if (!editor) return;
-
-		const selection = editor.selection;
-		if (selection.isEmpty) return;
-
-		// Get replacement text from workspace state or config
-		let replacementText = context.workspaceState.get<string>('mask.lastUsedText');
-
-		if (!replacementText) {
-			const config = vscode.workspace.getConfiguration('mask');
-			replacementText = config.get<string>('replacementText') || '[***]';
-			await context.workspaceState.update('mask.lastUsedText', replacementText);
+		if (!editor) {
+			return;
 		}
 
-		const fileUri = editor.document.uri.toString();
-		const ranges = maskedRanges.get(fileUri) || [];
-		const range = new vscode.Range(selection.start, selection.end);
+		const selection = editor.selection;
+		if (selection.isEmpty) {
+			return;
+		}
 
-		// Add the new range
-		ranges.push(range);
-		customReplacements.set(range.toString() + fileUri, replacementText);
+		await markSelection(context, 'masked', selection, editor);
+	});
 
-		// Merge overlapping ranges immediately
-		const mergedRanges = mergeOverlappingRanges(ranges, fileUri);
-		maskedRanges.set(fileUri, mergedRanges);
+	let markToRead = vscode.commands.registerCommand('mask.markToRead', async () => {
+		const editor = vscode.window.activeTextEditor;
+		if (!editor) {
+			return;
+		}
 
-		saveMasksToFile(true, fileUri); // Update timestamp when marking new masks
+		const selection = editor.selection;
+		if (selection.isEmpty) {
+			return;
+		}
 
-		// Save the current document to persist changes
-		await editor.document.save();
-
-		refreshDecorations();
+		await markSelection(context, 'toRead', selection, editor);
 	});
 
 	let unmarkMasked = vscode.commands.registerCommand('mask.unmarkMasked', async () => {
 		const editor = vscode.window.activeTextEditor;
-		if (!editor) return;
+		if (!editor) {
+			return;
+		}
 
 		const selection = editor.selection;
 		const fileUri = editor.document.uri.toString();
-		const ranges = maskedRanges.get(fileUri) || [];
 
-		const newRanges: vscode.Range[] = [];
-
-		for (const range of ranges) {
-			const intersection = range.intersection(selection);
-			if (!intersection) {
-				// No intersection, keep the original range
-				newRanges.push(range);
-			} else {
-				// There is intersection, need to split the range
-				const originalReplacementText = customReplacements.get(range.toString() + fileUri) || '[***]';
-
-				// Remove the original range's replacement text
-				customReplacements.delete(range.toString() + fileUri);
-
-				// Check if there's a part before the intersection
-				if (range.start.isBefore(selection.start)) {
-					const beforeRange = new vscode.Range(range.start, selection.start);
-					newRanges.push(beforeRange);
-					customReplacements.set(beforeRange.toString() + fileUri, originalReplacementText);
-				}
-
-				// Check if there's a part after the intersection
-				if (selection.end.isBefore(range.end)) {
-					const afterRange = new vscode.Range(selection.end, range.end);
-					newRanges.push(afterRange);
-					customReplacements.set(afterRange.toString() + fileUri, originalReplacementText);
-				}
-
-				// The intersection part is removed (not added to newRanges)
-			}
-		}
-
-		maskedRanges.set(fileUri, newRanges);
-
-		// If no ranges left, remove timestamp from cache
-		if (newRanges.length === 0) {
-			lastMaskedTimes.delete(fileUri);
-		}
+		removeSelectionFromMarkType(fileUri, selection, 'masked');
+		removeSelectionFromMarkType(fileUri, selection, 'toRead');
 
 		saveMasksToFile();
 
@@ -1008,16 +1161,24 @@ export function activate(context: vscode.ExtensionContext) {
 				// Remove entries from storage
 				let clearedCount = 0;
 				for (const fileUri of filesToClear) {
+					const fileMaskedRanges = maskedRanges.get(fileUri) || [];
+					const fileToReadRanges = toReadRanges.get(fileUri) || [];
+
 					delete storage[fileUri];
 					
 					// Also clear from in-memory cache
 					maskedRanges.delete(fileUri);
 					lastMaskedTimes.delete(fileUri); // Clear timestamp cache
+					toReadRanges.delete(fileUri);
+					lastToReadTimes.delete(fileUri);
 					
 					// Clear custom replacement texts
-					const ranges = maskedRanges.get(fileUri) || [];
-					for (const range of ranges) {
-						customReplacements.delete(range.toString() + fileUri);
+					for (const range of fileMaskedRanges) {
+						customReplacements.delete(getRangeStorageKey(range, fileUri, 'masked'));
+					}
+
+					for (const range of fileToReadRanges) {
+						customReplacements.delete(getRangeStorageKey(range, fileUri, 'toRead'));
 					}
 					
 					clearedCount++;
@@ -1052,11 +1213,13 @@ export function activate(context: vscode.ExtensionContext) {
 	// Handle copy operations
 	let copyHandler = vscode.commands.registerTextEditorCommand('editor.action.clipboardCopyAction', async () => {
 		const editor = vscode.window.activeTextEditor;
-		if (!editor) return;
+		if (!editor) {
+			return;
+		}
 
 		const selection = editor.selection;
 		const fileUri = editor.document.uri.toString();
-		const ranges = maskedRanges.get(fileUri) || [];
+		const ranges = getCombinedRanges(fileUri);
 		const selectedText = editor.document.getText(selection);
 
 		const intersectingRanges = ranges.filter(range => range.intersection(selection));
@@ -1085,11 +1248,13 @@ export function activate(context: vscode.ExtensionContext) {
 
 	let copyWithSyntaxHandler = vscode.commands.registerTextEditorCommand('editor.action.clipboardCopyWithSyntaxHighlightingAction', async () => {
 		const editor = vscode.window.activeTextEditor;
-		if (!editor) return;
+		if (!editor) {
+			return;
+		}
 
 		const selection = editor.selection;
 		const fileUri = editor.document.uri.toString();
-		const ranges = maskedRanges.get(fileUri) || [];
+		const ranges = getCombinedRanges(fileUri);
 		const selectedText = editor.document.getText(selection);
 
 		const intersectingRanges = ranges.filter(range => range.intersection(selection));
@@ -1118,6 +1283,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		markMasked,
+		markToRead,
 		unmarkMasked,
 		changeReplacementText,
 		findAllReferencesAndExpand,
@@ -1130,7 +1296,7 @@ export function activate(context: vscode.ExtensionContext) {
 			if (editor) {
 				const fileUri = editor.document.uri.toString();
 				// Load masks for this specific file if not already in memory
-				if (!maskedRanges.has(fileUri)) {
+				if (!maskedRanges.has(fileUri) && !toReadRanges.has(fileUri)) {
 					loadMasksForSingleFile(fileUri);
 				}
 			}
@@ -1139,14 +1305,14 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.workspace.onDidOpenTextDocument((document) => {
 			// Only load masks for the newly opened document, don't reload all masks
 			const fileUri = document.uri.toString();
-			if (!maskedRanges.has(fileUri)) {
+			if (!maskedRanges.has(fileUri) && !toReadRanges.has(fileUri)) {
 				loadMasksForSingleFile(fileUri);
 			}
 			refreshDecorations();
 		}),
 		vscode.workspace.onDidSaveTextDocument((document) => {
 			const fileUri = document.uri.toString();
-			const ranges = maskedRanges.get(fileUri);
+			const ranges = getCombinedRanges(fileUri);
 
 			// Only update metadata if this file has mask ranges
 			if (ranges && ranges.length > 0) {
@@ -1168,20 +1334,33 @@ function updateDecorationStyle() {
 		maskDecoration.dispose();
 	}
 
+	if (toReadDecoration) {
+		toReadDecoration.dispose();
+	}
+
 	const config = vscode.workspace.getConfiguration('mask');
-	const decorationColor = config.get<string>('decorationColor') || '#ff000033';
+	const maskedDecorationColor =
+		config.get<string>('maskedDecorationColor') ||
+		config.get<string>('decorationColor') ||
+		'#5f636833';
+	const toReadDecorationColor = config.get<string>('toReadDecorationColor') || '#9ad29a55';
 
 	maskDecoration = vscode.window.createTextEditorDecorationType({
-		backgroundColor: '#343434',
-		// border: '1px dashed gray',
+		backgroundColor: maskedDecorationColor,
 		overviewRulerColor: 'green',
+		overviewRulerLane: vscode.OverviewRulerLane.Right,
+	});
+
+	toReadDecoration = vscode.window.createTextEditorDecorationType({
+		backgroundColor: toReadDecorationColor,
+		overviewRulerColor: 'rgba(120, 180, 120, 0.9)',
 		overviewRulerLane: vscode.OverviewRulerLane.Right,
 	});
 }
 
-function calculateMaskPercentage(fileUri: string): number {
+function calculateMarkedPercentage(fileUri: string): number {
 	try {
-		const ranges = maskedRanges.get(fileUri) || [];
+		const ranges = getCombinedRanges(fileUri);
 		if (ranges.length === 0) {
 			return 0;
 		}
@@ -1225,11 +1404,13 @@ function refreshFileDecorations() {
 
 function refreshDecorations() {
 	const editor = vscode.window.activeTextEditor;
-	if (!editor) return;
+	if (!editor) {
+		return;
+	}
 
 	const fileUri = editor.document.uri.toString();
-	const ranges = maskedRanges.get(fileUri) || [];
-	editor.setDecorations(maskDecoration, ranges);
+	editor.setDecorations(maskDecoration, maskedRanges.get(fileUri) || []);
+	editor.setDecorations(toReadDecoration, toReadRanges.get(fileUri) || []);
 	
 	// Also refresh file decorations
 	refreshFileDecorations();
@@ -1238,5 +1419,9 @@ function refreshDecorations() {
 export function deactivate() {
 	if (maskDecoration) {
 		maskDecoration.dispose();
+	}
+
+	if (toReadDecoration) {
+		toReadDecoration.dispose();
 	}
 }
