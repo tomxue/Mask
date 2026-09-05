@@ -36,7 +36,11 @@
     "commands": [
       {
         "command": "mask.markMasked",
-        "title": "Mark as Masked"
+        "title": "Mask as Masked"
+      },
+      {
+        "command": "mask.markToRead",
+        "title": "Mask as ToRead"
       },
       {
         "command": "mask.unmarkMasked",
@@ -66,7 +70,17 @@
         "mask.decorationColor": {
           "type": "string",
           "default": "#ff000033",
-          "description": "Background color for masked code regions"
+          "description": "Legacy fallback background color for masked code regions"
+        },
+        "mask.maskedDecorationColor": {
+          "type": "string",
+          "default": "#5f636833",
+          "description": "Background color for Mask as Masked regions"
+        },
+        "mask.toReadDecorationColor": {
+          "type": "string",
+          "default": "#9ad29a55",
+          "description": "Background color for Mask as ToRead regions"
         }
       }
     },
@@ -74,6 +88,11 @@
       "editor/context": [
         {
           "command": "mask.markMasked",
+          "when": "editorHasSelection",
+          "group": "1_modification"
+        },
+        {
+          "command": "mask.markToRead",
           "when": "editorHasSelection",
           "group": "1_modification"
         },

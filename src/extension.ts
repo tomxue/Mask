@@ -484,6 +484,20 @@ function loadExistingMaskData(fileUri: string): MaskData | null {
 	}
 }
 
+function deleteMatchingStorageEntry(storage: MaskStorage, fileUri: string): { key: string; data: MaskData } | null {
+	const matchingStorageKey = findMatchingFileInStorage(fileUri, storage);
+	if (!matchingStorageKey) {
+		return null;
+	}
+
+	const matchingStorageData = storage[matchingStorageKey];
+	delete storage[matchingStorageKey];
+	return {
+		key: matchingStorageKey,
+		data: matchingStorageData
+	};
+}
+
 function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: string, targetMarkType?: MarkType) {
 	try {
 		// First, load existing storage to preserve data for files not currently in memory
@@ -507,9 +521,14 @@ function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: strin
 			...toReadRanges.keys()
 		]);
 
+		if (targetFileUri) {
+			allFileUris.add(targetFileUri);
+		}
+
 		for (const fileUri of allFileUris) {
 			const maskedFileRanges = mergeOverlappingRanges(dedupeRanges(maskedRanges.get(fileUri) || []), fileUri, 'masked');
 			const toReadFileRanges = mergeOverlappingRanges(dedupeRanges(toReadRanges.get(fileUri) || []), fileUri, 'toRead');
+			const matchingStorageEntry = deleteMatchingStorageEntry(storage, fileUri);
 
 			if (maskedFileRanges.length > 0) {
 				maskedRanges.set(fileUri, maskedFileRanges);
@@ -526,7 +545,6 @@ function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: strin
 			}
 
 			if (maskedFileRanges.length === 0 && toReadFileRanges.length === 0) {
-				delete storage[fileUri];
 				continue;
 			}
 
@@ -537,7 +555,7 @@ function saveMasksToFile(updateTimestamp: boolean = false, targetFileUri?: strin
 				continue;
 			}
 
-			const existingData = storage[fileUri];
+			const existingData = storage[fileUri] || matchingStorageEntry?.data;
 			const shouldUpdateThisFile = updateTimestamp && (!targetFileUri || targetFileUri === fileUri);
 			const maskedTime = shouldUpdateThisFile && targetMarkType === 'masked'
 				? Date.now()
@@ -1000,7 +1018,7 @@ export function activate(context: vscode.ExtensionContext) {
 		removeSelectionFromMarkType(fileUri, selection, 'masked');
 		removeSelectionFromMarkType(fileUri, selection, 'toRead');
 
-		saveMasksToFile();
+		saveMasksToFile(false, fileUri);
 
 		// Save the current document to persist changes
 		await editor.document.save();
